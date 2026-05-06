@@ -22,11 +22,12 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Heavy artefacts (keep out of VCS)
-data/
-results/
-checkpoints/
-wandb/
+# Heavy artefacts (keep out of VCS) — anchored to repo root so they don't
+# accidentally swallow `src/ais5/data/` or similar package directories.
+/data/
+/results/
+/checkpoints/
+/wandb/
 *.ckpt
 *.bin
 *.safetensors

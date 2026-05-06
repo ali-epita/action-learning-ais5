@@ -1,0 +1,14 @@
+# Zero-shot specialist baselines on ScreenSpot-V2 (re-run as needed for Pro).
+# Run each model in turn so VRAM doesn't accumulate.
+seed: 42
+limit: null
+
+model:
+  name: os-atlas-4b
+  kwargs:
+    device_map: auto
+    torch_dtype: auto
+    max_new_tokens: 64
+
+benchmark: screenspot-v2
+data: {}

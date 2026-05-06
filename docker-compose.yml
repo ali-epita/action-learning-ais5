@@ -1,0 +1,48 @@
+# Two services share the same image:
+#   * dev      — long-running container for shell access (`make docker-shell`)
+#   * jupyter  — Jupyter Lab on http://localhost:8888 (`make jupyter`)
+#
+# Both mount the repo bind-style so edits on the host show up immediately.
+# Hugging Face cache is a named volume so models aren't re-downloaded each rebuild.
+
+x-base: &base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ais5:latest
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - ./:/app
+    - hf-cache:/data/.hf_cache
+  working_dir: /app
+  environment:
+    PYTHONPATH: /app/src
+    HF_HOME: /data/.hf_cache
+
+services:
+  dev:
+    <<: *base
+    container_name: ais5-dev
+    command: tail -f /dev/null
+    profiles: ["dev"]
+
+  jupyter:
+    <<: *base
+    container_name: ais5-jupyter
+    ports:
+      - "8888:8888"
+    command: >
+      jupyter lab
+      --ip=0.0.0.0
+      --port=8888
+      --no-browser
+      --allow-root
+      --ServerApp.token=
+      --ServerApp.password=
+      --ServerApp.root_dir=/app
+    profiles: ["jupyter"]
+
+volumes:
+  hf-cache:

@@ -1,0 +1,39 @@
+# Task 3 — efficiency / quantization grid.
+#
+# Runs each (model × quant) cell on each benchmark, recording accuracy +
+# latency + peak VRAM. Generates the data behind the latency-accuracy and
+# VRAM-accuracy Pareto fronts.
+seed: 42
+limit: 50  # smoke-run default; null = full benchmark
+
+models:
+  - name: qwen2.5-vl-3b
+    kwargs:
+      device_map: auto
+      torch_dtype: auto
+  - name: paligemma-3b
+    kwargs:
+      device_map: auto
+      torch_dtype: auto
+  - name: showui-2b
+    kwargs:
+      device_map: auto
+      torch_dtype: auto
+  - name: os-atlas-4b
+    kwargs:
+      device_map: auto
+      torch_dtype: auto
+
+# none = bf16/fp16 baseline; bnb8 = LLM.int8; bnb4 = NF4 4-bit weights.
+# AWQ / GPTQ checkpoints are not in the grid by default — load by HF id when needed.
+quant:
+  - none
+  - bnb8
+  - bnb4
+
+benchmarks:
+  - screenspot-v2
+  - screenspot-pro
+  - osworld-g
+
+data: {}

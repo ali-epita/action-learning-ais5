@@ -151,5 +151,7 @@ def _resolve_dtype(name: str) -> Any:
     import torch
 
     if name == "auto":
+        if torch.backends.mps.is_available() and not torch.cuda.is_available():
+            return torch.float32
         return "auto"
     return getattr(torch, name)

@@ -7,17 +7,25 @@ uses fallback keys.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from io import BytesIO
 from typing import Any
+from zipfile import ZipFile
 
 from .types import GroundingSample
 
 # Default mirrors. Override via the env vars or by passing `repo_id` directly.
-SCREENSPOT_V2_REPO = "likaixin/ScreenSpot-v2-variants"
+SCREENSPOT_V2_REPO = "OS-Copilot/ScreenSpot-v2"
 SCREENSPOT_PRO_REPO = "likaixin/ScreenSpot-Pro"
+_SCREENSPOT_V2_JSONS = (
+    "screenspot_desktop_v2.json",
+    "screenspot_mobile_v2.json",
+    "screenspot_web_v2.json",
+)
 
 
-def _coerce_bbox(raw: Any) -> tuple[float, float, float, float]:
+def _coerce_bbox(raw: Any, *, fmt: str | None = None) -> tuple[float, float, float, float]:
     """Accept (x1, y1, x2, y2) or (x, y, w, h) lists/tuples; return (x1, y1, x2, y2)."""
     if raw is None:
         raise ValueError("missing bbox")
@@ -25,6 +33,10 @@ def _coerce_bbox(raw: Any) -> tuple[float, float, float, float]:
     if len(coords) != 4:
         raise ValueError(f"expected 4 bbox values, got {len(coords)}: {raw}")
     x1, y1, a, b = coords
+    if fmt == "xywh":
+        return (x1, y1, x1 + a, y1 + b)
+    if fmt == "xyxy":
+        return (x1, y1, a, b)
     if a < x1 or b < y1:
         return (x1, y1, x1 + a, y1 + b)
     return (x1, y1, a, b)
@@ -37,13 +49,19 @@ def _first_present(row: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _row_to_sample(row: dict[str, Any], benchmark: str, idx: int) -> GroundingSample:
+def _row_to_sample(
+    row: dict[str, Any],
+    benchmark: str,
+    idx: int,
+    *,
+    bbox_format: str | None = None,
+) -> GroundingSample:
     image = row["image"]
-    bbox = _coerce_bbox(_first_present(row, "bbox", "bounding_box", "box"))
+    bbox = _coerce_bbox(_first_present(row, "bbox", "bounding_box", "box"), fmt=bbox_format)
     instruction = _first_present(row, "instruction", "query", "task", default="")
     target_type = _first_present(row, "data_type", "element_type", "target_type")
     ui_type = _first_present(row, "data_source", "platform", "application", "group")
-    sample_id = _first_present(row, "id", "image_id", default=str(idx))
+    sample_id = _first_present(row, "id", "image_id", "img_filename", default=str(idx))
 
     extras = {
         k: v
@@ -83,9 +101,55 @@ def _load_iter(
 ) -> Iterator[GroundingSample]:
     from datasets import load_dataset
 
-    ds = load_dataset(repo_id, split=split, streaming=streaming, **load_kwargs)
+    try:
+        ds = load_dataset(repo_id, split=split, streaming=streaming, **load_kwargs)
+        loaded_split = split
+    except ValueError as exc:
+        if split == "train" or "Unknown split" not in str(exc):
+            raise
+        # Some HF mirrors package benchmark examples as a single `train` split.
+        # Treat that as the evaluation split rather than forcing every config to
+        # know the mirror-specific naming convention.
+        ds = load_dataset(repo_id, split="train", streaming=streaming, **load_kwargs)
+        loaded_split = "train"
     for i, row in enumerate(ds):
-        yield _row_to_sample(row, benchmark, i)
+        sample = _row_to_sample(row, benchmark, i)
+        sample.extra.setdefault("requested_split", split)
+        sample.extra.setdefault("loaded_split", loaded_split)
+        yield sample
+
+
+def _load_os_copilot_screenspot_v2(repo_id: str) -> Iterator[GroundingSample]:
+    """Load the canonical OS-Copilot ScreenSpot-V2 JSON + image zip layout."""
+    from huggingface_hub import hf_hub_download
+
+    image_zip_path = hf_hub_download(repo_id, "screenspotv2_image.zip", repo_type="dataset")
+    json_paths = [
+        hf_hub_download(repo_id, filename, repo_type="dataset")
+        for filename in _SCREENSPOT_V2_JSONS
+    ]
+
+    idx = 0
+    with ZipFile(image_zip_path) as images:
+        for json_path in json_paths:
+            with open(json_path, encoding="utf-8") as f:
+                rows = json.load(f)
+            for row in rows:
+                image_name = row["img_filename"]
+                with images.open(f"screenspotv2_image/{image_name}") as image_file:
+                    from PIL import Image
+
+                    image = Image.open(BytesIO(image_file.read())).convert("RGB")
+                sample = _row_to_sample(
+                    {**row, "image": image},
+                    "screenspot-v2",
+                    idx,
+                    bbox_format="xywh",
+                )
+                sample.extra.setdefault("requested_split", "test")
+                sample.extra.setdefault("loaded_split", "os-copilot-json")
+                yield sample
+                idx += 1
 
 
 def load_screenspot_v2(
@@ -96,6 +160,9 @@ def load_screenspot_v2(
     **kwargs: Any,
 ) -> Iterator[GroundingSample]:
     """Yield ScreenSpot-V2 samples (1,272 in the test split)."""
+    if repo_id == "OS-Copilot/ScreenSpot-v2":
+        yield from _load_os_copilot_screenspot_v2(repo_id)
+        return
     yield from _load_iter(repo_id, "screenspot-v2", split, streaming=streaming, **kwargs)
 
 

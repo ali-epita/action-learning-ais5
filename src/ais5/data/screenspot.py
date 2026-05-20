@@ -8,6 +8,7 @@ uses fallback keys.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
@@ -181,15 +182,18 @@ def _load_likaixin_screenspot_pro(repo_id: str) -> Iterator[GroundingSample]:
     images_dir = local_root / "images"
 
     idx = 0
+    skipped = 0
     for json_path in sorted(annotations_dir.glob("*.json")):
         with open(json_path, encoding="utf-8") as f:
             rows = json.load(f)
         for row in rows:
             image_filename = row.get("img_filename")
-            if not image_filename:
+            if not image_filename or row.get("bbox") is None:
+                skipped += 1
                 continue
             image_path = images_dir / image_filename
             if not image_path.exists():
+                skipped += 1
                 continue
             image = Image.open(image_path).convert("RGB")
             # Pro uses `ui_type` and `platform`; promote to the keys the unified
@@ -206,6 +210,11 @@ def _load_likaixin_screenspot_pro(repo_id: str) -> Iterator[GroundingSample]:
             sample.extra.setdefault("annotation_file", json_path.name)
             yield sample
             idx += 1
+    if skipped:
+        warnings.warn(
+            f"Skipped {skipped} invalid ScreenSpot-Pro rows with missing bbox/image.",
+            stacklevel=2,
+        )
 
 
 def load_screenspot_pro(

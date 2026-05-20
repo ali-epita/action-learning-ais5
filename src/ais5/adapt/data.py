@@ -106,9 +106,13 @@ def adapt_uground_row(row: dict) -> GroundingTrainExample | None:
     width, height}`. The human turn embeds the target description between
     "Description:" and "Answer:"; the gpt turn answers with "(x, y)" in pixel
     coordinates relative to the image.
+
+    Tiny images (<56px on either side) are skipped — Qwen2.5-VL's vision tower
+    requires at least 4 patches (2x2 merge unit) after preprocessing, and
+    sub-thumbnail screenshots break the spatial_merge reshape.
     """
     image = _coerce_image(row.get("image"))
-    if image is None:
+    if image is None or image.width < 56 or image.height < 56:
         return None
     convs = row.get("conversations")
     if isinstance(convs, str):

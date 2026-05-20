@@ -137,29 +137,16 @@ def run_lora_training(
 def _load_default_train_data(args: TrainingArgs) -> Dataset:
     """Load `train_subset_size` rows from `args.train_dataset`.
 
-    Prefers sliced-split download when the dataset supports it (small footprint),
-    falls back to full load + .select, then to streaming + .take if nothing
-    else works. The third path returns an IterableDataset, which forces
+    Streaming first: HF's sliced-split path (`train[:N]`) downloads whole
+    parquet shards regardless of N, which blows out Colab disk for datasets
+    like OS-Atlas-data (many GB per shard). Streaming + `.take` fetches rows
+    on demand and caches nothing. Returns an IterableDataset, which forces
     `run_lora_training` to compute `max_steps` instead of using num_train_epochs.
     """
     from datasets import load_dataset
 
     log.info(
-        "Loading %s [first %d rows]", args.train_dataset, args.train_subset_size
+        "Streaming %s [first %d rows]", args.train_dataset, args.train_subset_size
     )
-    try:
-        return load_dataset(
-            args.train_dataset, split=f"train[:{args.train_subset_size}]"
-        )
-    except (ValueError, NotImplementedError) as exc:
-        log.info("Sliced split unsupported (%s); falling back to full load", exc)
-
-    try:
-        ds = load_dataset(args.train_dataset, split="train")
-        n = min(len(ds), args.train_subset_size)
-        return ds.select(range(n))
-    except Exception as exc:  # noqa: BLE001
-        log.info("Full load failed (%s); falling back to streaming", exc)
-
     ds = load_dataset(args.train_dataset, split="train", streaming=True)
     return ds.take(args.train_subset_size)

@@ -3,7 +3,7 @@
     1. Predict on the full screenshot → coarse point.
     2. Crop a window of `crop_size` centered on that point.
     3. Predict on the crop → refined point.
-    4. Translate the refined point back to original-image coordinates.
+    4. Translate crop-local refined points back to original-image coordinates.
 
 If the first stage fails to parse a point, we fall back to the full-image
 prediction (no refinement). The wrapper is deliberately model-agnostic — it
@@ -66,7 +66,15 @@ def crop_then_click(
         return coarse
 
     rx, ry = refined.parsed.point
-    final_point = (rx + x1, ry + y1)
+    crop_w, crop_h = crop.size
+    if 0 <= rx <= crop_w and 0 <= ry <= crop_h:
+        final_point = (rx + x1, ry + y1)
+        coord_frame = "crop-local"
+    else:
+        # Some VLMs keep answering in full-screen coordinates even when shown a
+        # crop. Treat obvious out-of-crop predictions as already full-image.
+        final_point = (rx, ry)
+        coord_frame = "full-image"
     return ModelOutput(
         text=refined.text,
         parsed=ParsedAction(
@@ -79,6 +87,8 @@ def crop_then_click(
             **refined.metadata,
             "crop_box": (x1, y1, x2, y2),
             "coarse_point": (cx, cy),
+            "refined_point": (rx, ry),
+            "refined_coord_frame": coord_frame,
             "crop_size": cfg.crop_size,
         },
     )

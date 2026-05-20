@@ -37,6 +37,16 @@ def test_crop_then_click_translates_back_to_original_coords():
     out = crop_then_click(model, image, "click", cfg=CropConfig(crop_size=200))
     assert out.parsed.point == (650.0, 650.0)
     assert out.metadata["crop_box"] == (600, 600, 800, 800)
+    assert out.metadata["refined_coord_frame"] == "crop-local"
+
+
+def test_crop_then_click_keeps_full_image_refined_coords():
+    image = Image.new("RGB", (1000, 1000), color="white")
+    model = FakeModel([(700, 700), (900, 100)])
+    out = crop_then_click(model, image, "click", cfg=CropConfig(crop_size=200))
+    assert out.parsed.point == (900, 100)
+    assert out.metadata["crop_box"] == (600, 600, 800, 800)
+    assert out.metadata["refined_coord_frame"] == "full-image"
 
 
 def test_crop_then_click_returns_coarse_when_stage1_fails():

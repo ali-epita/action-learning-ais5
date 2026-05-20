@@ -2,6 +2,7 @@
 
 from .data import (
     GroundingTrainExample,
+    PaliGemmaGroundingCollator,
     QwenVLGroundingCollator,
     ROW_ADAPTERS,
     adapt_auto_row,
@@ -16,6 +17,7 @@ from .train import TrainingArgs, run_lora_training
 __all__ = [
     "GroundingTrainExample",
     "LoRAConfig",
+    "PaliGemmaGroundingCollator",
     "QwenVLGroundingCollator",
     "ROW_ADAPTERS",
     "TrainingArgs",

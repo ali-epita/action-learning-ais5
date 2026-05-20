@@ -330,8 +330,11 @@ def test_make_collator_without_adapter_expects_examples():
 def test_make_collator_rejects_unknown_backbone():
     from ais5.adapt import make_collator
 
-    with pytest.raises(NotImplementedError):
-        make_collator("paligemma", _FakeProcessor())
+    with pytest.raises(NotImplementedError) as exc_info:
+        make_collator("llava", _FakeProcessor())
+    # Error lists supported backbones so the user knows what to switch to.
+    msg = str(exc_info.value)
+    assert "qwen" in msg.lower() and "paligemma" in msg.lower()
 
 
 def test_make_collator_rejects_unknown_adapter():
@@ -349,3 +352,151 @@ def test_make_collator_with_adapter_raises_if_all_rows_fail():
     # Rows with no usable image or target.
     with pytest.raises(ValueError, match="failed to adapt"):
         collator([{"foo": 1}, {"bar": 2}])
+
+
+# ── PaliGemma collator ───────────────────────────────────────────────────────
+
+
+class _FakePaliGemmaProcessor:
+    """Minimal PaliGemmaProcessor stand-in.
+
+    When `suffix=` is supplied, returns `labels` with the prompt prefix masked,
+    mirroring the real processor's behavior. With `return_labels=False` it omits
+    `labels` entirely, simulating a too-old transformers version.
+    """
+
+    def __init__(self, *, return_labels: bool = True) -> None:
+        self.tokenizer = _FakeTokenizer()
+        self.return_labels = return_labels
+
+    def __call__(
+        self,
+        *,
+        text: list[str],
+        images: list,
+        suffix: list[str] | None = None,
+        return_tensors: str = "pt",
+        padding: str = "longest",
+    ) -> dict:
+        assert return_tensors == "pt"
+        prefix_lens: list[int] = []
+        full_seqs: list[list[int]] = []
+        for i, prompt in enumerate(text):
+            prefix = [99, 99, 99] + [(ord(c) % 90) + 10 for c in prompt]
+            prefix_lens.append(len(prefix))
+            if suffix is not None:
+                suf_ids = [(ord(c) % 90) + 10 for c in suffix[i]]
+                full_seqs.append(prefix + suf_ids)
+            else:
+                full_seqs.append(list(prefix))
+        max_len = max(len(s) for s in full_seqs)
+        input_ids = torch.full(
+            (len(full_seqs), max_len), self.tokenizer.pad_token_id, dtype=torch.long
+        )
+        attn = torch.zeros_like(input_ids)
+        for i, s in enumerate(full_seqs):
+            input_ids[i, : len(s)] = torch.tensor(s, dtype=torch.long)
+            attn[i, : len(s)] = 1
+        result: dict = {
+            "input_ids": input_ids,
+            "attention_mask": attn,
+            "pixel_values": torch.ones(len(full_seqs), 3, 8, 8),
+        }
+        if suffix is not None and self.return_labels:
+            labels = input_ids.clone()
+            for i, pl in enumerate(prefix_lens):
+                labels[i, :pl] = -100
+            labels[attn == 0] = -100
+            result["labels"] = labels
+        return result
+
+
+def test_paligemma_encode_format_matches_parser_regex():
+    import re
+
+    from ais5.adapt.data import _encode_paligemma_loc
+    from ais5.prompt.action import parse_click
+
+    s = _encode_paligemma_loc((128, 256), image_size=(1024, 512), bins=1024)
+    assert re.fullmatch(r"<loc\d{4}><loc\d{4}>", s) is not None
+
+    # Round-trip through the decoder. The parser returns bin centers, so the
+    # decoded point is within half a bin of the original target.
+    parsed = parse_click(s, image_size=(1024, 512))
+    assert parsed.point is not None
+    px, py = parsed.point
+    assert abs(px - 128.5) < 1.0
+    assert abs(py - 256.25) < 1.0
+
+
+def test_paligemma_encode_clamps_to_grid_edge():
+    from ais5.adapt.data import _encode_paligemma_loc
+
+    # Pixel coords sitting on the image edge would index past the grid without
+    # the clamp; the collator must never emit <loc1024>.
+    assert _encode_paligemma_loc((100, 100), image_size=(100, 100), bins=1024) == \
+        "<loc1023><loc1023>"
+
+
+def test_paligemma_collator_returns_labels_with_prefix_masked():
+    from ais5.adapt import PaliGemmaGroundingCollator
+
+    proc = _FakePaliGemmaProcessor()
+    collator = PaliGemmaGroundingCollator(proc)
+    ex = _make_example(target=(50, 50), instruction="click")
+    batch = collator([ex])
+
+    assert "labels" in batch
+    labels = batch["labels"]
+    # First three positions are the image tokens — must be masked.
+    assert (labels[0, :3] == -100).all()
+    # At least some positions are real (the suffix tokens).
+    assert (labels[0] != -100).any()
+
+
+def test_paligemma_collator_raises_when_processor_no_labels():
+    """If the processor is too old to emit suffix-derived labels, we fail loudly."""
+    from ais5.adapt import PaliGemmaGroundingCollator
+
+    proc = _FakePaliGemmaProcessor(return_labels=False)
+    collator = PaliGemmaGroundingCollator(proc)
+    with pytest.raises(RuntimeError, match="did not return"):
+        collator([_make_example()])
+
+
+def test_paligemma_collator_batches_two_examples():
+    from ais5.adapt import PaliGemmaGroundingCollator
+
+    proc = _FakePaliGemmaProcessor()
+    collator = PaliGemmaGroundingCollator(proc)
+    examples = [
+        _make_example(target=(10, 20), instruction="short"),
+        _make_example(target=(40, 60), instruction="much longer instruction"),
+    ]
+    batch = collator(examples)
+    assert batch["input_ids"].shape[0] == 2
+    assert batch["labels"].shape == batch["input_ids"].shape
+    # Shorter sequence's padded positions are masked.
+    assert (batch["labels"][batch["attention_mask"] == 0] == -100).all()
+
+
+def test_make_collator_paligemma_dispatch():
+    from ais5.adapt import PaliGemmaGroundingCollator, make_collator
+
+    proc = _FakePaliGemmaProcessor()
+    collator = make_collator("paligemma", proc)
+    assert isinstance(collator, PaliGemmaGroundingCollator)
+
+
+def test_make_collator_paligemma_with_adapter():
+    from ais5.adapt import make_collator
+
+    proc = _FakePaliGemmaProcessor()
+    collator = make_collator("paligemma", proc, adapter="auto")
+    rows = [
+        {"image": _img(), "instruction": "tap", "point": (5.0, 5.0)},
+    ]
+    batch = collator(rows)
+    assert "labels" in batch
+
+

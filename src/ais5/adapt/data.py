@@ -27,6 +27,7 @@ from typing import Any
 from PIL import Image as PILImage
 from PIL.Image import Image
 
+from ..models.paligemma import PALIGEMMA_POINT_PROMPT
 from ..prompt.templates import CLICK_PROMPT, format_click_prompt
 
 
@@ -292,6 +293,79 @@ class QwenVLGroundingCollator:
         return out
 
 
+def _encode_paligemma_loc(point: tuple[float, float], image_size: tuple[int, int], bins: int) -> str:
+    """Bin a pixel target into the `<loc{row:04d}><loc{col:04d}>` PaliGemma format.
+
+    Uses floor binning so coordinates in `[0, span)` land in their natural bin;
+    clamps to `bins - 1` so pixel coords sitting on the bottom/right edge
+    don't index past the grid. The decoder in `ais5.prompt.action` reads bin
+    centers, so floor encoding is the correct inverse for the median case.
+    """
+    x, y = point
+    w, h = image_size
+    col = min(max(int(x / max(1, w) * bins), 0), bins - 1)
+    row = min(max(int(y / max(1, h) * bins), 0), bins - 1)
+    return f"<loc{row:04d}><loc{col:04d}>"
+
+
+class PaliGemmaGroundingCollator:
+    """HF-Trainer compatible collator for PaliGemma grounding fine-tuning.
+
+    PaliGemma was pre-trained with task prefixes; for pointing tasks the prompt
+    is `"point: <instruction>"` and the target is `<loc{row:04d}><loc{col:04d}>`,
+    indexing a `bins`-wide grid that the `paligemma-loc` parser decodes back
+    to pixels.
+
+    Uses PaliGemmaProcessor's `suffix=` argument so the prefix portion of
+    `labels` is auto-masked. Requires transformers>=4.40 (the version Colab
+    ships with `transformers<5` is well past that).
+    """
+
+    def __init__(
+        self,
+        processor: Any,
+        *,
+        prompt_template: str | None = None,
+        bins: int = 1024,
+        ignore_index: int = -100,
+    ) -> None:
+        self.processor = processor
+        self.prompt_template = prompt_template or PALIGEMMA_POINT_PROMPT
+        self.bins = bins
+        self.ignore_index = ignore_index
+        tok = getattr(processor, "tokenizer", None)
+        if tok is not None and getattr(tok, "pad_token", None) is None:
+            eos = getattr(tok, "eos_token", None)
+            if eos is not None:
+                tok.pad_token = eos
+
+    def _build_prompt(self, example: GroundingTrainExample) -> str:
+        return self.prompt_template.format(instruction=example.instruction)
+
+    def _format_answer(self, example: GroundingTrainExample) -> str:
+        return _encode_paligemma_loc(
+            example.target_point, example.image.size, self.bins
+        )
+
+    def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
+        prompts = [self._build_prompt(ex) for ex in examples]
+        suffixes = [self._format_answer(ex) for ex in examples]
+        images = [ex.image for ex in examples]
+        batch = self.processor(
+            text=prompts,
+            suffix=suffixes,
+            images=images,
+            return_tensors="pt",
+            padding="longest",
+        )
+        if "labels" not in batch:
+            raise RuntimeError(
+                "PaliGemmaProcessor did not return `labels` for the suffix= "
+                "path. Upgrade transformers (>=4.40) or pass a custom collator."
+            )
+        return dict(batch)
+
+
 def make_collator(
     backbone: str,
     processor: Any,
@@ -301,8 +375,12 @@ def make_collator(
 ) -> Callable[[list[Any]], dict[str, Any]]:
     """Return the right collator for `backbone`.
 
-    Today only Qwen2.5-VL is wired up. PaliGemma needs a separate collator
-    because the prompt format and image-token expansion differ.
+    Today: 'qwen2.5-vl' and 'paligemma'. Other backbones raise
+    NotImplementedError. The two implementations differ because the prompt
+    format and target-token convention differ:
+
+      qwen2.5-vl : chat template, target = "<click>x, y</click>"
+      paligemma  : "point: ..." prefix, target = "<loc{row:04d}><loc{col:04d}>"
 
     If `adapter` is given, the returned callable accepts raw HF-dataset rows
     (dicts) and converts each via the adapter before batching. If `adapter`
@@ -311,9 +389,11 @@ def make_collator(
     family = backbone.lower()
     if "qwen" in family:
         base = QwenVLGroundingCollator(processor, prompt_template=prompt_template)
+    elif "paligemma" in family:
+        base = PaliGemmaGroundingCollator(processor, prompt_template=prompt_template)
     else:
         raise NotImplementedError(
-            f"No collator yet for backbone {backbone!r}. Today: 'qwen2.5-vl'."
+            f"No collator yet for backbone {backbone!r}. Today: 'qwen2.5-vl', 'paligemma'."
         )
 
     if adapter is None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 from zipfile import ZipFile
 
@@ -166,6 +167,47 @@ def load_screenspot_v2(
     yield from _load_iter(repo_id, "screenspot-v2", split, streaming=streaming, **kwargs)
 
 
+def _load_likaixin_screenspot_pro(repo_id: str) -> Iterator[GroundingSample]:
+    """Load ScreenSpot-Pro from likaixin's per-domain JSON + PNG layout.
+
+    `load_dataset` can't auto-detect this layout, so we `snapshot_download`
+    the repo and walk `annotations/<domain>.json` + `images/<subdir>/*.png`.
+    """
+    from huggingface_hub import snapshot_download
+    from PIL import Image
+
+    local_root = Path(snapshot_download(repo_id, repo_type="dataset"))
+    annotations_dir = local_root / "annotations"
+    images_dir = local_root / "images"
+
+    idx = 0
+    for json_path in sorted(annotations_dir.glob("*.json")):
+        with open(json_path, encoding="utf-8") as f:
+            rows = json.load(f)
+        for row in rows:
+            image_filename = row.get("img_filename")
+            if not image_filename:
+                continue
+            image_path = images_dir / image_filename
+            if not image_path.exists():
+                continue
+            image = Image.open(image_path).convert("RGB")
+            # Pro uses `ui_type` and `platform`; promote to the keys the unified
+            # `_row_to_sample` already understands.
+            normalized = dict(row)
+            normalized.setdefault("data_type", normalized.pop("ui_type", None))
+            normalized.setdefault("data_source", normalized.get("platform"))
+            normalized["image"] = image
+            sample = _row_to_sample(
+                normalized, "screenspot-pro", idx, bbox_format="xyxy"
+            )
+            sample.extra.setdefault("application", row.get("application"))
+            sample.extra.setdefault("group", row.get("group"))
+            sample.extra.setdefault("annotation_file", json_path.name)
+            yield sample
+            idx += 1
+
+
 def load_screenspot_pro(
     split: str = "test",
     *,
@@ -174,4 +216,7 @@ def load_screenspot_pro(
     **kwargs: Any,
 ) -> Iterator[GroundingSample]:
     """Yield ScreenSpot-Pro samples (~1,581 high-resolution professional UIs)."""
+    if repo_id == "likaixin/ScreenSpot-Pro":
+        yield from _load_likaixin_screenspot_pro(repo_id)
+        return
     yield from _load_iter(repo_id, "screenspot-pro", split, streaming=streaming, **kwargs)

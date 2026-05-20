@@ -99,7 +99,10 @@ def _register_defaults() -> None:
             name="ferret-ui-lite-3b",
             family="specialist",
             param_count_b=3.0,
-            hf_id="apple/Ferret-UI-Lite-3B",  # placeholder; verify on release
+            # No public weights as of 2026-05-20 — `apple/Ferret-UI-Lite-3B`
+            # returns 401, only the published numbers (V2 91.6%, Pro 53.3%) are
+            # citable. Loading this row will fail; Task 3's backup branch.
+            hf_id="apple/Ferret-UI-Lite-3B",
             factory=FerretUILite,
         )
     )

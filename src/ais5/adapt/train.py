@@ -1,4 +1,4 @@
-"""LoRA training loop for grounding data (OS-Atlas + UGround mixture).
+"""LoRA training loop for grounding data.
 
 Designed to run inside a Colab/Kaggle notebook: a single `run_lora_training`
 call drives data loading, optim, and checkpointing. Heavy imports are lazy.
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..utils.io import ensure_dir
 from ..utils.logging import get_logger
+from .data import make_collator
 from .lora import LoRAConfig, attach_lora, count_trainable
 
 if TYPE_CHECKING:
@@ -24,7 +25,8 @@ log = get_logger(__name__)
 class TrainingArgs:
     output_dir: str = "checkpoints/qwen2.5-vl-3b-lora"
     train_dataset: str = "OS-Copilot/OS-Atlas-data"
-    train_subset_size: int = 50_000  # default below the 200K stretch goal
+    train_subset_size: int = 50_000
+    adapter: str = "auto"  # key in ROW_ADAPTERS, or use a custom callable via train_data
     eval_dataset: str | None = None
     num_train_epochs: float = 1.0
     per_device_train_batch_size: int = 1
@@ -46,18 +48,12 @@ def run_lora_training(
     lora: LoRAConfig,
     args: TrainingArgs,
     *,
-    train_data: Dataset | None = None,
+    train_data: Any = None,
 ) -> Path:
     """LoRA-fine-tune `model_name` on `train_data` and write a PEFT adapter to disk.
 
-    Returns the output directory containing `adapter_model.safetensors`.
-
-    Notes
-    -----
-    The collator needs to be VLM-aware (image + text). For now this function
-    delegates to HF's `Trainer` with a dataset that yields `{"input_ids", "labels",
-    "pixel_values"}`. If you adapt this for ShowUI / OS-Atlas you'll likely need
-    a custom collator — see `notebooks/01_task1_lora_adaptation.ipynb`.
+    Returns the output directory containing `adapter_model.safetensors`. Pass
+    a custom `train_data` (HF `Dataset` of dict rows) to override `args.train_dataset`.
     """
     from transformers import Trainer, TrainingArguments
 
@@ -68,8 +64,10 @@ def run_lora_training(
 
     log.info("Loading base model %s", model_name)
     base = get_model(model_name)
-    if base.model is None:
-        raise RuntimeError("Model wrapper did not load `self.model`")
+    if base.model is None or base.processor is None:
+        raise RuntimeError(
+            f"{model_name} wrapper did not populate .model / .processor"
+        )
 
     peft_model = attach_lora(base.model, lora)
     trainable, total = count_trainable(peft_model)
@@ -83,41 +81,85 @@ def run_lora_training(
     if train_data is None:
         train_data = _load_default_train_data(args)
 
-    output_dir = ensure_dir(args.output_dir)
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
-        weight_decay=args.weight_decay,
-        bf16=args.bf16,
-        fp16=args.fp16,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        save_strategy="steps",
-        report_to=["none"],
-        seed=args.seed,
-        **args.extra,
+    collator = make_collator(
+        backbone=lora.backbone,
+        processor=base.processor,
+        adapter=args.adapter,
     )
+
+    output_dir = ensure_dir(args.output_dir)
+    streaming = not hasattr(train_data, "__len__")
+    training_kwargs: dict[str, Any] = {
+        "output_dir": str(output_dir),
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": args.weight_decay,
+        "bf16": args.bf16,
+        "fp16": args.fp16,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_strategy": "steps",
+        "report_to": ["none"],
+        "seed": args.seed,
+        "remove_unused_columns": False,  # the collator needs raw dataset rows
+        **args.extra,
+    }
+    if streaming:
+        # IterableDataset has no length; Trainer needs max_steps in that case.
+        effective_batch = (
+            args.per_device_train_batch_size * args.gradient_accumulation_steps
+        )
+        training_kwargs["max_steps"] = max(
+            1,
+            int(args.train_subset_size * args.num_train_epochs / effective_batch),
+        )
+    else:
+        training_kwargs["num_train_epochs"] = args.num_train_epochs
+
+    training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
         model=peft_model,
         args=training_args,
         train_dataset=train_data,
+        data_collator=collator,
         tokenizer=base.processor,
     )
     trainer.train()
     peft_model.save_pretrained(str(output_dir))
     log.info("Saved LoRA adapter to %s", output_dir)
-    return output_dir
+    return Path(output_dir)
 
 
 def _load_default_train_data(args: TrainingArgs) -> Dataset:
+    """Load `train_subset_size` rows from `args.train_dataset`.
+
+    Prefers sliced-split download when the dataset supports it (small footprint),
+    falls back to full load + .select, then to streaming + .take if nothing
+    else works. The third path returns an IterableDataset, which forces
+    `run_lora_training` to compute `max_steps` instead of using num_train_epochs.
+    """
     from datasets import load_dataset
 
-    log.info("Streaming %s and taking %d samples", args.train_dataset, args.train_subset_size)
+    log.info(
+        "Loading %s [first %d rows]", args.train_dataset, args.train_subset_size
+    )
+    try:
+        return load_dataset(
+            args.train_dataset, split=f"train[:{args.train_subset_size}]"
+        )
+    except (ValueError, NotImplementedError) as exc:
+        log.info("Sliced split unsupported (%s); falling back to full load", exc)
+
+    try:
+        ds = load_dataset(args.train_dataset, split="train")
+        n = min(len(ds), args.train_subset_size)
+        return ds.select(range(n))
+    except Exception as exc:  # noqa: BLE001
+        log.info("Full load failed (%s); falling back to streaming", exc)
+
     ds = load_dataset(args.train_dataset, split="train", streaming=True)
     return ds.take(args.train_subset_size)

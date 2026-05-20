@@ -19,6 +19,8 @@ this collator emits responses the inference parser can read.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from io import BytesIO
@@ -93,9 +95,44 @@ def adapt_os_atlas_row(row: dict) -> GroundingTrainExample | None:
     )
 
 
+_UGROUND_DESC_RE = re.compile(r"Description:\s*(.+?)\s*Answer:", re.DOTALL)
+_UGROUND_POINT_RE = re.compile(r"\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)")
+
+
 def adapt_uground_row(row: dict) -> GroundingTrainExample | None:
-    """Adapter for UGround rows. In practice the same shape as OS-Atlas."""
-    return adapt_os_atlas_row(row)
+    """Adapter for `osunlp/UGround-V1-Data` (LLaVA-style conversations).
+
+    Each row carries `{image (bytes), conversations (list[dict] or JSON string),
+    width, height}`. The human turn embeds the target description between
+    "Description:" and "Answer:"; the gpt turn answers with "(x, y)" in pixel
+    coordinates relative to the image.
+    """
+    image = _coerce_image(row.get("image"))
+    if image is None:
+        return None
+    convs = row.get("conversations")
+    if isinstance(convs, str):
+        try:
+            convs = json.loads(convs)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(convs, list):
+        return None
+    human = next((t.get("value") for t in convs if t.get("from") == "human"), None)
+    gpt = next((t.get("value") for t in convs if t.get("from") == "gpt"), None)
+    if not human or not gpt:
+        return None
+    desc_match = _UGROUND_DESC_RE.search(human)
+    instruction = desc_match.group(1).strip() if desc_match else human.strip()
+    point_match = _UGROUND_POINT_RE.search(gpt)
+    if point_match is None:
+        return None
+    point = (float(point_match.group(1)), float(point_match.group(2)))
+    return GroundingTrainExample(
+        image=image,
+        instruction=instruction,
+        target_point=point,
+    )
 
 
 def adapt_auto_row(row: dict) -> GroundingTrainExample | None:

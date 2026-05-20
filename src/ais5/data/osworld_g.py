@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
+import warnings
 
-from .screenspot import _row_to_sample
+from .screenspot import _try_row_to_sample
 from .types import GroundingSample
 
 # The canonical OSWorld-G mirror. `xlangai/OSWorld-G` (cited in the proposal)
@@ -25,5 +26,15 @@ def load_osworld_g(
     from datasets import load_dataset
 
     ds = load_dataset(repo_id, split=split, streaming=streaming, **kwargs)
+    skipped = 0
     for i, row in enumerate(ds):
-        yield _row_to_sample(row, "osworld-g", i)
+        sample = _try_row_to_sample(row, "osworld-g", i)
+        if sample is None:
+            skipped += 1
+            continue
+        yield sample
+    if skipped:
+        warnings.warn(
+            f"Skipped {skipped} invalid OSWorld-G rows with missing image/bbox.",
+            stacklevel=2,
+        )

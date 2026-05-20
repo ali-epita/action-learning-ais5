@@ -93,6 +93,19 @@ def _row_to_sample(
     )
 
 
+def _try_row_to_sample(
+    row: dict[str, Any],
+    benchmark: str,
+    idx: int,
+    *,
+    bbox_format: str | None = None,
+) -> GroundingSample | None:
+    try:
+        return _row_to_sample(row, benchmark, idx, bbox_format=bbox_format)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _load_iter(
     repo_id: str,
     benchmark: str,
@@ -114,11 +127,20 @@ def _load_iter(
         # know the mirror-specific naming convention.
         ds = load_dataset(repo_id, split="train", streaming=streaming, **load_kwargs)
         loaded_split = "train"
+    skipped = 0
     for i, row in enumerate(ds):
-        sample = _row_to_sample(row, benchmark, i)
+        sample = _try_row_to_sample(row, benchmark, i)
+        if sample is None:
+            skipped += 1
+            continue
         sample.extra.setdefault("requested_split", split)
         sample.extra.setdefault("loaded_split", loaded_split)
         yield sample
+    if skipped:
+        warnings.warn(
+            f"Skipped {skipped} invalid {benchmark} rows with missing image/bbox.",
+            stacklevel=2,
+        )
 
 
 def _load_os_copilot_screenspot_v2(repo_id: str) -> Iterator[GroundingSample]:
@@ -142,12 +164,14 @@ def _load_os_copilot_screenspot_v2(repo_id: str) -> Iterator[GroundingSample]:
                     from PIL import Image
 
                     image = Image.open(BytesIO(image_file.read())).convert("RGB")
-                sample = _row_to_sample(
+                sample = _try_row_to_sample(
                     {**row, "image": image},
                     "screenspot-v2",
                     idx,
                     bbox_format="xywh",
                 )
+                if sample is None:
+                    continue
                 sample.extra.setdefault("requested_split", "test")
                 sample.extra.setdefault("loaded_split", "os-copilot-json")
                 yield sample
@@ -202,9 +226,12 @@ def _load_likaixin_screenspot_pro(repo_id: str) -> Iterator[GroundingSample]:
             normalized.setdefault("data_type", normalized.pop("ui_type", None))
             normalized.setdefault("data_source", normalized.get("platform"))
             normalized["image"] = image
-            sample = _row_to_sample(
+            sample = _try_row_to_sample(
                 normalized, "screenspot-pro", idx, bbox_format="xyxy"
             )
+            if sample is None:
+                skipped += 1
+                continue
             sample.extra.setdefault("application", row.get("application"))
             sample.extra.setdefault("group", row.get("group"))
             sample.extra.setdefault("annotation_file", json_path.name)

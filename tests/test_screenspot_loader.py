@@ -38,6 +38,31 @@ def test_screenspot_falls_back_to_train_split(monkeypatch):
     assert samples[0].extra["loaded_split"] == "train"
 
 
+def test_load_iter_skips_rows_missing_bbox(monkeypatch):
+    fake_datasets = ModuleType("datasets")
+
+    def fake_load_dataset(repo_id, *, split, streaming=False, **kwargs):
+        return [
+            {
+                "image": Image.new("RGB", (100, 100)),
+                "instruction": "missing bbox",
+            },
+            {
+                "image": Image.new("RGB", (100, 100)),
+                "bbox": [10, 10, 20, 20],
+                "instruction": "submit",
+            },
+        ]
+
+    fake_datasets.load_dataset = fake_load_dataset
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    samples = list(_load_iter("mirror/repo", "screenspot-v2", "test"))
+
+    assert len(samples) == 1
+    assert samples[0].instruction == "submit"
+
+
 def test_screenspot_v2_xywh_bbox_is_converted_to_xyxy():
     sample = _row_to_sample(
         {

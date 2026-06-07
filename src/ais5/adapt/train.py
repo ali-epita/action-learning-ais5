@@ -141,7 +141,16 @@ def run_lora_training(
     trainer.train()
     peft_model.save_pretrained(str(output_dir))
     log.info("Saved LoRA adapter to %s", output_dir)
-    return Path(output_dir)
+
+    out_path = Path(output_dir)
+    # Free the training model's GPU memory before returning so the next load
+    # (eval, or the next rank) gets the whole device instead of offloading
+    # layers to CPU, which makes inference crawl.
+    from ..utils.env import free_model
+
+    del trainer, peft_model, base
+    free_model()
+    return out_path
 
 
 def _load_default_train_data(args: TrainingArgs) -> Dataset:

@@ -44,6 +44,7 @@ class TrainingArgs:
     os_atlas_subsets: tuple[str, ...] | None = None  # only used for OS-Atlas-data
     report_to: list[str] | None = None  # e.g. ["wandb"]; None -> no tracking
     run_name: str | None = None  # tracker run name (W&B etc.)
+    skip_bad_vision_batches: bool = True
     seed: int = 42
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -129,7 +130,8 @@ def run_lora_training(
 
     training_args = TrainingArguments(**training_kwargs)
 
-    trainer = Trainer(
+    trainer_cls = _skip_bad_vision_trainer(Trainer) if args.skip_bad_vision_batches else Trainer
+    trainer = trainer_cls(
         model=peft_model,
         args=training_args,
         train_dataset=train_data,
@@ -167,3 +169,54 @@ def _load_default_train_data(args: TrainingArgs) -> Dataset:
     )
     ds = load_dataset(args.train_dataset, split="train", streaming=True)
     return ds.take(args.train_subset_size)
+
+
+def _is_qwen_bad_vision_batch_error(exc: BaseException) -> bool:
+    """True for Qwen2.5-VL's known bad-image spatial-merge crash."""
+    msg = str(exc)
+    return (
+        "shape '[0, 4, -1]' is invalid" in msg
+        or 'shape "[0, 4, -1]" is invalid' in msg
+    )
+
+
+def _zero_trainable_loss(model: Any) -> Any:
+    for param in model.parameters():
+        if getattr(param, "requires_grad", False):
+            return param.sum() * 0.0
+    for param in model.parameters():
+        return param.sum() * 0.0
+    raise RuntimeError("Cannot build zero loss for a model with no parameters")
+
+
+def _skip_bad_vision_trainer(base_cls: type) -> type:
+    """Return a Trainer subclass that skips Qwen malformed visual batches.
+
+    Some UGround rows still produce a Qwen vision-tower reshape crash after
+    processor-level validation, depending on the Colab transformers/torch path.
+    Treat those rare rows like corrupt training examples instead of aborting
+    the whole LoRA run.
+    """
+
+    class SkipBadVisionTrainer(base_cls):
+        _bad_vision_batches: int = 0
+
+        def compute_loss(self, model: Any, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+            try:
+                return super().compute_loss(model, inputs, *args, **kwargs)
+            except RuntimeError as exc:
+                if not _is_qwen_bad_vision_batch_error(exc):
+                    raise
+                self._bad_vision_batches += 1
+                if self._bad_vision_batches <= 5 or self._bad_vision_batches % 25 == 0:
+                    log.warning(
+                        "Skipping Qwen bad visual batch #%d: %s",
+                        self._bad_vision_batches,
+                        exc,
+                    )
+                loss = _zero_trainable_loss(model)
+                if kwargs.get("return_outputs"):
+                    return loss, {}
+                return loss
+
+    return SkipBadVisionTrainer

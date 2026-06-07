@@ -365,6 +365,32 @@ def test_qwen_collator_drops_examples_with_bad_patch_tensor_shape():
     assert batch["input_ids"].shape[0] == 1
 
 
+def test_qwen_collator_validates_full_conversation_shape():
+    """Some Qwen processor failures only appear on the prompt+answer text.
+
+    The training batch uses the full conversation, so validating only the
+    prompt-only tokenization can still let a bad visual tensor reach the model.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithBadFullRows(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "FULLBADZZ" in text[0] and "<click>" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(1, 1280)
+            return out
+
+    proc = _ProcWithBadFullRows()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="FULLBADZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
 def test_qwen_collator_drops_examples_with_non_divisible_grid():
     from ais5.adapt import QwenVLGroundingCollator
 
@@ -601,4 +627,3 @@ def test_make_collator_paligemma_with_adapter():
     ]
     batch = collator(rows)
     assert "labels" in batch
-

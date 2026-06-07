@@ -346,6 +346,23 @@ class QwenVLGroundingCollator:
                 continue
             if not self._valid_vision_shape(prompt_tokens):
                 continue
+
+            try:
+                full_msgs = self._build_messages(ex, with_answer=True)
+                full_text = self.processor.apply_chat_template(
+                    full_msgs, tokenize=False, add_generation_prompt=False
+                )
+                full_tokens = self.processor(
+                    text=[full_text],
+                    images=[ex.image],
+                    return_tensors="pt",
+                    padding=False,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if not self._valid_vision_shape(full_tokens):
+                continue
+
             valid_examples.append(ex)
             prompt_lens.append(int(prompt_tokens["input_ids"].shape[1]))
 
@@ -373,6 +390,11 @@ class QwenVLGroundingCollator:
             return_tensors="pt",
             padding=True,
         )
+        if not self._valid_vision_shape(batch):
+            raise ValueError(
+                "QwenVLGroundingCollator: the batched full conversation still "
+                "has an invalid visual-token shape after per-example filtering."
+            )
 
         input_ids = batch["input_ids"]
         labels = input_ids.clone()

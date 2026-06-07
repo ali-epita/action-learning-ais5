@@ -300,28 +300,43 @@ class QwenVLGroundingCollator:
     # offenders before they reach the model.
     _MIN_VISION_TOKENS = 4
     _SPATIAL_MERGE_UNIT = 4
+    _RAW_PATCH_NUMEL = 3 * 2 * 14 * 14
 
     @classmethod
     def _valid_vision_shape(cls, tokens: dict[str, Any]) -> bool:
         grid = tokens.get("image_grid_thw")
+        grid_patches: list[int] = []
         if grid is not None and grid.numel() > 0:
             for row in grid:
                 n_visual = int(row.prod().item())
+                grid_patches.append(n_visual)
                 if n_visual < cls._MIN_VISION_TOKENS:
                     return False
                 if n_visual % cls._SPATIAL_MERGE_UNIT != 0:
                     return False
 
-        # Real Qwen2.5-VL processors return flattened patch rows here. This is
-        # the shape the vision tower reshapes, so it catches processor/grid
-        # mismatches that `image_grid_thw` alone can miss. Test fakes may use a
-        # conventional BCHW tensor, which is not the Qwen patch layout.
+        # Real Qwen2.5-VL processors can return either flattened patch rows
+        # `(n_patches, 1176)` or explicit raw patches `(n_patches, 3, 2, 14, 14)`.
+        # The vision tower reshapes this tensor before the 2x2 merge, so validate
+        # the effective patch-row count and its consistency with image_grid_thw.
         pixel_values = tokens.get("pixel_values")
-        if pixel_values is not None and getattr(pixel_values, "ndim", None) == 2:
-            n_patches = int(pixel_values.shape[0])
+        n_patches: int | None = None
+        if pixel_values is not None:
+            ndim = getattr(pixel_values, "ndim", None)
+            shape = tuple(getattr(pixel_values, "shape", ()))
+            if ndim == 2:
+                n_patches = int(shape[0])
+            elif ndim == 5 and shape[1:] == (3, 2, 14, 14):
+                n_patches = int(shape[0])
+            elif hasattr(pixel_values, "numel") and pixel_values.numel() % cls._RAW_PATCH_NUMEL == 0:
+                n_patches = int(pixel_values.numel() // cls._RAW_PATCH_NUMEL)
+
+        if n_patches is not None:
             if n_patches < cls._MIN_VISION_TOKENS:
                 return False
             if n_patches % cls._SPATIAL_MERGE_UNIT != 0:
+                return False
+            if grid_patches and n_patches != sum(grid_patches):
                 return False
 
         return True

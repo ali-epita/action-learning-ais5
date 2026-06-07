@@ -42,6 +42,8 @@ class TrainingArgs:
     gradient_checkpointing: bool = False
     eval_steps: int | None = None
     os_atlas_subsets: tuple[str, ...] | None = None  # only used for OS-Atlas-data
+    report_to: list[str] | None = None  # e.g. ["wandb"]; None -> no tracking
+    run_name: str | None = None  # tracker run name (W&B etc.)
     seed: int = 42
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -107,7 +109,8 @@ def run_lora_training(
         "gradient_checkpointing": args.gradient_checkpointing,
         "eval_steps": args.eval_steps,
         "save_strategy": "steps",
-        "report_to": ["none"],
+        "report_to": args.report_to if args.report_to is not None else ["none"],
+        "run_name": args.run_name,
         "seed": args.seed,
         "remove_unused_columns": False,  # the collator needs raw dataset rows
         **args.extra,

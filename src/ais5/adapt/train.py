@@ -41,6 +41,7 @@ class TrainingArgs:
     save_total_limit: int | None = 1  # cap on-disk checkpoints (None = keep all)
     gradient_checkpointing: bool = False
     eval_steps: int | None = None
+    os_atlas_subsets: tuple[str, ...] | None = None  # only used for OS-Atlas-data
     seed: int = 42
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -141,12 +142,21 @@ def run_lora_training(
 def _load_default_train_data(args: TrainingArgs) -> Dataset:
     """Load `train_subset_size` rows from `args.train_dataset`.
 
-    Streaming first: HF's sliced-split path (`train[:N]`) downloads whole
-    parquet shards regardless of N, which blows out Colab disk for datasets
-    like OS-Atlas-data (many GB per shard). Streaming + `.take` fetches rows
-    on demand and caches nothing. Returns an IterableDataset, which forces
-    `run_lora_training` to compute `max_steps` instead of using num_train_epochs.
+    OS-Atlas-data ships labels as separate per-domain JSONs that `load_dataset`
+    cannot pair to the image zips, so it routes through the custom
+    `os_atlas_dataset` loader. Everything else streams via HF: `.take(N)` fetches
+    rows on demand and caches nothing, returning an IterableDataset so
+    `run_lora_training` computes `max_steps` instead of using num_train_epochs.
     """
+    if args.train_dataset == "OS-Copilot/OS-Atlas-data":
+        from .os_atlas import DEFAULT_SUBSETS, os_atlas_dataset
+
+        subsets = args.os_atlas_subsets or DEFAULT_SUBSETS
+        log.info(
+            "Loading OS-Atlas subsets %s [first %d rows]", subsets, args.train_subset_size
+        )
+        return os_atlas_dataset(subsets, limit=args.train_subset_size)
+
     from datasets import load_dataset
 
     log.info(

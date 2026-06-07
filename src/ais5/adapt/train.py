@@ -69,7 +69,14 @@ def run_lora_training(
     set_global_seed(args.seed)
 
     log.info("Loading base model %s", model_name)
-    base = get_model(model_name)
+    # Load fully on one GPU for training. device_map='auto' (the inference
+    # default) offloads layers to CPU when the GPU is busy, and an offloaded
+    # Qwen2.5-VL vision tower crashes inside the Trainer. Pin to cuda:0 so an
+    # over-full GPU fails loudly (OOM) instead of silently offloading.
+    import torch
+
+    device_map = {"": 0} if torch.cuda.is_available() else None
+    base = get_model(model_name, device_map=device_map)
     if base.model is None or base.processor is None:
         raise RuntimeError(
             f"{model_name} wrapper did not populate .model / .processor"

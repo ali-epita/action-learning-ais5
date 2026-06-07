@@ -295,9 +295,36 @@ class QwenVLGroundingCollator:
         ]
 
     # Qwen2.5-VL's vision tower applies a 2x2 spatial merge (spatial_merge_unit=4),
-    # so any image whose grid yields fewer than 4 raw patches crashes the
-    # reshape. We pre-validate per-example in pass 1 and drop offenders.
+    # so images with fewer than 4 raw patches, or a non-multiple-of-4 patch
+    # count, crash the reshape. We pre-validate per-example in pass 1 and drop
+    # offenders before they reach the model.
     _MIN_VISION_TOKENS = 4
+    _SPATIAL_MERGE_UNIT = 4
+
+    @classmethod
+    def _valid_vision_shape(cls, tokens: dict[str, Any]) -> bool:
+        grid = tokens.get("image_grid_thw")
+        if grid is not None and grid.numel() > 0:
+            for row in grid:
+                n_visual = int(row.prod().item())
+                if n_visual < cls._MIN_VISION_TOKENS:
+                    return False
+                if n_visual % cls._SPATIAL_MERGE_UNIT != 0:
+                    return False
+
+        # Real Qwen2.5-VL processors return flattened patch rows here. This is
+        # the shape the vision tower reshapes, so it catches processor/grid
+        # mismatches that `image_grid_thw` alone can miss. Test fakes may use a
+        # conventional BCHW tensor, which is not the Qwen patch layout.
+        pixel_values = tokens.get("pixel_values")
+        if pixel_values is not None and getattr(pixel_values, "ndim", None) == 2:
+            n_patches = int(pixel_values.shape[0])
+            if n_patches < cls._MIN_VISION_TOKENS:
+                return False
+            if n_patches % cls._SPATIAL_MERGE_UNIT != 0:
+                return False
+
+        return True
 
     def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
         # Pass 1: per-example prompt-only length + validate visual-token count.
@@ -317,11 +344,8 @@ class QwenVLGroundingCollator:
                 )
             except Exception:  # noqa: BLE001
                 continue
-            grid = prompt_tokens.get("image_grid_thw")
-            if grid is not None and grid.numel() > 0:
-                n_visual = int(grid[0].prod().item())
-                if n_visual < self._MIN_VISION_TOKENS:
-                    continue
+            if not self._valid_vision_shape(prompt_tokens):
+                continue
             valid_examples.append(ex)
             prompt_lens.append(int(prompt_tokens["input_ids"].shape[1]))
 

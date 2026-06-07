@@ -337,6 +337,54 @@ def test_qwen_collator_drops_examples_with_too_few_vision_tokens():
     assert batch["input_ids"].shape[0] == 1
 
 
+def test_qwen_collator_drops_examples_with_bad_patch_tensor_shape():
+    """The real Qwen processor returns flattened patch rows in `pixel_values`.
+
+    A row can have a grid that looks barely valid while the actual patch tensor
+    still has fewer rows than the visual tower's 2x2 merge requires. The
+    collator must validate the tensor shape too, because that is what the model
+    reshapes.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithBadPatchRows(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "PATCHZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(2, 1280)
+            return out
+
+    proc = _ProcWithBadPatchRows()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="PATCHZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_drops_examples_with_non_divisible_grid():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithOddGrid(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "ODDGRIDZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 1, 5]], dtype=torch.long)
+            return out
+
+    proc = _ProcWithOddGrid()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="ODDGRIDZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
 def test_qwen_collator_raises_when_every_example_is_bad():
     from ais5.adapt import QwenVLGroundingCollator
 
@@ -553,5 +601,4 @@ def test_make_collator_paligemma_with_adapter():
     ]
     batch = collator(rows)
     assert "labels" in batch
-
 

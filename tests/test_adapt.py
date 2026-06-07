@@ -78,11 +78,17 @@ class _FakeProcessor:
         for i, ids in enumerate(per_seq):
             out_ids[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
             out_attn[i, : len(ids)] = 1
+        # image_grid_thw matches Qwen2.5-VL's real shape (n_images, 3) = (T,H,W).
+        # Values default to (1, 4, 4) → 16 patches per image, well above the
+        # collator's 4-patch minimum for the 2x2 spatial merger.
+        grid = torch.tensor(
+            [[1, 4, 4]] * len(per_seq), dtype=torch.long
+        )
         return {
             "input_ids": out_ids,
             "attention_mask": out_attn,
             "pixel_values": torch.ones(len(per_seq), 3, 8, 8),
-            "image_grid_thw": torch.ones(len(per_seq), 1, dtype=torch.long),
+            "image_grid_thw": grid,
         }
 
 
@@ -298,6 +304,55 @@ def test_qwen_collator_sets_pad_token_when_missing():
     proc.tokenizer.pad_token = None  # simulate Qwen's "no pad" default
     QwenVLGroundingCollator(proc)
     assert proc.tokenizer.pad_token == proc.tokenizer.eos_token
+
+
+def test_qwen_collator_drops_examples_with_too_few_vision_tokens():
+    """Examples whose `image_grid_thw` prod < spatial_merge_unit are dropped,
+    so a bad image cannot poison the rest of the batch and crash the vision
+    tower's reshape. Mixed batches keep the survivors and continue.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithTinyGridForA(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            # Mark the TINYZZ-instruction example as grid (1,1,1) → 1 visual token.
+            # The instruction is embedded in the click-prompt template, so match
+            # on the instruction text itself rather than a chat-role marker.
+            grid = out["image_grid_thw"].clone()
+            for i, t in enumerate(text):
+                if "TINYZZ" in t:
+                    grid[i] = torch.tensor([1, 1, 1], dtype=torch.long)
+            out["image_grid_thw"] = grid
+            return out
+
+    proc = _ProcWithTinyGridForA()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="TINYZZ")
+    good = _make_example(target=(50, 50), instruction="BIGZZ")
+    batch = collator([bad, good])
+    # Only the survivor "good" makes it into the batch.
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_raises_when_every_example_is_bad():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _AllTiny(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            out["image_grid_thw"] = torch.ones(
+                len(text), 3, dtype=torch.long
+            )  # prod = 1
+            return out
+
+    collator = QwenVLGroundingCollator(_AllTiny())
+    with pytest.raises(ValueError, match="too few visual tokens"):
+        collator([_make_example(instruction="A")])
 
 
 # ── make_collator ────────────────────────────────────────────────────────────

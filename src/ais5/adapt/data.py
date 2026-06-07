@@ -44,22 +44,36 @@ class GroundingTrainExample:
 
 
 def _coerce_image(obj: Any) -> Image | None:
-    """Turn a HF-datasets `image` field into a PIL RGB image, or None."""
-    if obj is None:
+    """Turn a HF-datasets `image` field into a PIL RGB image, or None.
+
+    Forces decode via `.load()` so corrupt or truncated bytes raise here
+    (and we skip the row) rather than producing a PIL handle that looks
+    valid by `.width`/`.height` but holds degenerate pixel data, which
+    then breaks downstream vision-tower reshapes.
+    """
+    try:
+        if obj is None:
+            return None
+        if isinstance(obj, Image):
+            img = obj if obj.mode == "RGB" else obj.convert("RGB")
+        elif isinstance(obj, (bytes, bytearray)):
+            img = PILImage.open(BytesIO(obj)).convert("RGB")
+        elif isinstance(obj, str):
+            img = PILImage.open(obj).convert("RGB")
+        elif isinstance(obj, dict):
+            # HF datasets can hand back {"bytes": b"...", "path": "..."}.
+            if obj.get("bytes") is not None:
+                img = PILImage.open(BytesIO(obj["bytes"])).convert("RGB")
+            elif obj.get("path"):
+                img = PILImage.open(obj["path"]).convert("RGB")
+            else:
+                return None
+        else:
+            return None
+        img.load()
+    except Exception:  # noqa: BLE001
         return None
-    if isinstance(obj, Image):
-        return obj if obj.mode == "RGB" else obj.convert("RGB")
-    if isinstance(obj, (bytes, bytearray)):
-        return PILImage.open(BytesIO(obj)).convert("RGB")
-    if isinstance(obj, str):
-        return PILImage.open(obj).convert("RGB")
-    if isinstance(obj, dict):
-        # HF datasets can hand back {"bytes": b"...", "path": "..."}.
-        if obj.get("bytes") is not None:
-            return PILImage.open(BytesIO(obj["bytes"])).convert("RGB")
-        if obj.get("path"):
-            return PILImage.open(obj["path"]).convert("RGB")
-    return None
+    return img
 
 
 def _bbox_center(bbox: Any) -> tuple[float, float] | None:
@@ -280,26 +294,48 @@ class QwenVLGroundingCollator:
             },
         ]
 
+    # Qwen2.5-VL's vision tower applies a 2x2 spatial merge (spatial_merge_unit=4),
+    # so any image whose grid yields fewer than 4 raw patches crashes the
+    # reshape. We pre-validate per-example in pass 1 and drop offenders.
+    _MIN_VISION_TOKENS = 4
+
     def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
-        # Pass 1: per-example prompt-only length (where the answer starts).
+        # Pass 1: per-example prompt-only length + validate visual-token count.
+        valid_examples: list[GroundingTrainExample] = []
         prompt_lens: list[int] = []
         for ex in examples:
-            msgs = self._build_messages(ex, with_answer=False)
-            prompt_text = self.processor.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
-            )
-            prompt_tokens = self.processor(
-                text=[prompt_text],
-                images=[ex.image],
-                return_tensors="pt",
-                padding=False,
-            )
+            try:
+                msgs = self._build_messages(ex, with_answer=False)
+                prompt_text = self.processor.apply_chat_template(
+                    msgs, tokenize=False, add_generation_prompt=True
+                )
+                prompt_tokens = self.processor(
+                    text=[prompt_text],
+                    images=[ex.image],
+                    return_tensors="pt",
+                    padding=False,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            grid = prompt_tokens.get("image_grid_thw")
+            if grid is not None and grid.numel() > 0:
+                n_visual = int(grid[0].prod().item())
+                if n_visual < self._MIN_VISION_TOKENS:
+                    continue
+            valid_examples.append(ex)
             prompt_lens.append(int(prompt_tokens["input_ids"].shape[1]))
 
-        # Pass 2: batch the full conversations.
+        if not valid_examples:
+            raise ValueError(
+                "QwenVLGroundingCollator: every example in this batch produced "
+                "too few visual tokens for the 2x2 spatial merger. Increase "
+                "per_device_train_batch_size or tighten the adapter filter."
+            )
+
+        # Pass 2: batch the full conversations for the survivors only.
         full_texts: list[str] = []
         images: list[Image] = []
-        for ex in examples:
+        for ex in valid_examples:
             msgs = self._build_messages(ex, with_answer=True)
             full_texts.append(
                 self.processor.apply_chat_template(

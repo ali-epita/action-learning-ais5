@@ -69,14 +69,13 @@ def run_lora_training(
     set_global_seed(args.seed)
 
     log.info("Loading base model %s", model_name)
-    # Load fully on one GPU for training. device_map='auto' (the inference
-    # default) offloads layers to CPU when the GPU is busy, and an offloaded
-    # Qwen2.5-VL vision tower crashes inside the Trainer. Pin to cuda:0 so an
-    # over-full GPU fails loudly (OOM) instead of silently offloading.
-    import torch
-
-    device_map = {"": 0} if torch.cuda.is_available() else None
-    base = get_model(model_name, device_map=device_map)
+    # No device_map for training. Any device_map (even {'': 0}) gives the model
+    # an hf_device_map, which makes the HF Trainer/accelerate treat the run as
+    # "dispatched" and slice every input along dim 0 to the batch size. Qwen2.5-VL
+    # packs pixel_values as (num_patches, 1176) where dim 0 is patches, not batch,
+    # so it gets sliced to a single patch and the vision tower crashes. Loading
+    # plain lets the Trainer move the model to the GPU and never dispatch.
+    base = get_model(model_name, device_map=None)
     if base.model is None or base.processor is None:
         raise RuntimeError(
             f"{model_name} wrapper did not populate .model / .processor"
@@ -121,6 +120,12 @@ def run_lora_training(
         "run_name": args.run_name,
         "seed": args.seed,
         "remove_unused_columns": False,  # the collator needs raw dataset rows
+        # Streaming IterableDatasets make accelerate dispatch batches from the
+        # main process, slicing every input to the batch size on dim 0. Qwen2.5-VL
+        # packs pixel_values as (num_patches, 1176) where dim 0 is patches, so the
+        # slice corrupts the vision input. Disable dispatch so each process reads
+        # its own batches and pixel_values stays intact.
+        "accelerator_config": {"dispatch_batches": False},
         **args.extra,
     }
     if streaming:

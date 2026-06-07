@@ -38,6 +38,8 @@ class TrainingArgs:
     fp16: bool = False
     logging_steps: int = 25
     save_steps: int = 1000
+    save_total_limit: int | None = 1  # cap on-disk checkpoints (None = keep all)
+    gradient_checkpointing: bool = False
     eval_steps: int | None = None
     seed: int = 42
     extra: dict[str, Any] = field(default_factory=dict)
@@ -100,6 +102,8 @@ def run_lora_training(
         "fp16": args.fp16,
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "gradient_checkpointing": args.gradient_checkpointing,
         "eval_steps": args.eval_steps,
         "save_strategy": "steps",
         "report_to": ["none"],

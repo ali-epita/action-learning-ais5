@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import statistics
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from .latency import LatencyStats
 from .memory import MemoryStats, measure_peak_memory
 
 if TYPE_CHECKING:
+    from ..data.types import GroundingSample
     from ..models.base import GUIModel
 
 log = get_logger(__name__)
@@ -165,7 +167,7 @@ class BenchResult:
 
 def run_full_benchmark(
     model: GUIModel,
-    samples: list,
+    samples: Iterable[GroundingSample],
     *,
     benchmark: str,
     quant_label: str = "fp16",
@@ -173,6 +175,11 @@ def run_full_benchmark(
     measure_components: bool = False,
 ) -> BenchResult:
     """Run accuracy + latency + memory for one (model, quant, bench) cell.
+
+    `samples` may be any iterable of `GroundingSample`, including a lazy
+    generator from `iter_benchmark(...)`. It is consumed once, so passing a
+    generator keeps a single decoded image in RAM instead of materializing the
+    whole benchmark.
 
     With `measure_components=True`, attach a forward hook to the model's vision
     tower so we can attribute per-step time between visual encode and the rest

@@ -1,0 +1,25 @@
+# Colab/Kaggle runtime deps for the AIS 5 notebooks.
+# torch and torchvision are intentionally omitted: Colab ships a CUDA-matched
+# build, and the notebooks install the package with `pip install -e . --no-deps`
+# to keep it. Pinning torch here would fight Colab's pre-installed build.
+
+transformers>=4.49,<5
+accelerate>=0.34
+datasets>=3.0
+huggingface-hub>=0.25
+hf_transfer>=0.1
+safetensors>=0.4
+peft>=0.13
+qwen-vl-utils>=0.0.10
+bitsandbytes>=0.44
+pillow>=10.4
+numpy>=1.26,<2.2
+pandas>=2.2
+pyarrow>=17.0
+matplotlib>=3.9
+seaborn>=0.13
+tqdm>=4.66
+pyyaml>=6.0
+rich>=13.8
+typer>=0.12
+psutil>=6.0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from itertools import islice
 from typing import Any
 
 from .osworld_g import load_osworld_g
@@ -26,3 +27,19 @@ def load_benchmark(name: str, **kwargs: Any) -> Iterator[GroundingSample]:
             f"Unknown benchmark {name!r}. Available: {', '.join(list_benchmarks())}"
         )
     return _BENCHMARKS[name](**kwargs)
+
+
+def iter_benchmark(
+    name: str, *, limit: int | None = None, **kwargs: Any
+) -> Iterator[GroundingSample]:
+    """Lazily yield benchmark samples, optionally capped at `limit`.
+
+    Keeps one decoded image in memory at a time. Use this instead of
+    `list(load_benchmark(name))` in notebooks: materializing a whole benchmark
+    (e.g. ScreenSpot-Pro's high-resolution screenshots) holds every decoded
+    image in RAM at once and OOMs Colab.
+    """
+    stream: Iterator[GroundingSample] = load_benchmark(name, **kwargs)
+    if limit is not None:
+        stream = islice(stream, limit)
+    yield from stream

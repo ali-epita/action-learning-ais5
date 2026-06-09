@@ -145,7 +145,14 @@ def adapt_uground_row(row: dict) -> GroundingTrainExample | None:
     point_match = _UGROUND_POINT_RE.search(gpt)
     if point_match is None:
         return None
-    point = (float(point_match.group(1)), float(point_match.group(2)))
+    # UGround-V1 stores click targets NORMALIZED to [0, 1000], not pixels (verified:
+    # no coordinate exceeds 1000 even on 1200-1436px-wide images). Denormalize to
+    # absolute image pixels so the collator's `<click>x, y</click>` target matches
+    # Qwen2.5-VL's pixel output convention and the eval scorer. Without this the
+    # adapter learns the wrong coordinate scale and accuracy collapses (61.5% -> 20.5%).
+    x_norm, y_norm = float(point_match.group(1)), float(point_match.group(2))
+    w, h = image.size
+    point = (x_norm / 1000.0 * w, y_norm / 1000.0 * h)
     return GroundingTrainExample(
         image=image,
         instruction=instruction,

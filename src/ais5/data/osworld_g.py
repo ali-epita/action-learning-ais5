@@ -28,7 +28,17 @@ def load_osworld_g(
     ds = load_dataset(repo_id, split=split, streaming=streaming, **kwargs)
     skipped = 0
     for i, row in enumerate(ds):
-        sample = _try_row_to_sample(row, "osworld-g", i)
+        # MMInstruction/OSWorld-G names the click box `mimo_bbox` (x1,y1,x2,y2) /
+        # `box_coordinates` (x,y,w,h) — neither is a key the shared converter
+        # recognises, so promote one to `bbox` with the right format.
+        norm = dict(row)
+        if norm.get("mimo_bbox") is not None:
+            norm["bbox"], fmt = norm["mimo_bbox"], "xyxy"
+        elif norm.get("box_coordinates") is not None:
+            norm["bbox"], fmt = norm["box_coordinates"], "xywh"
+        else:
+            fmt = None
+        sample = _try_row_to_sample(norm, "osworld-g", i, bbox_format=fmt)
         if sample is None:
             skipped += 1
             continue

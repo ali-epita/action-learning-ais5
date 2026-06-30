@@ -35,6 +35,12 @@ env/
 *.pth
 *.gguf
 
+# Local offline models (kept out of VCS; weights also matched by *.safetensors)
+/whisper-large-v3-turbo-asr-fp16/
+/mlx-qwen-r64-4bit/
+/merged-qwen-r64/
+/gguf/
+
 # HF cache
 .hf_cache/
 

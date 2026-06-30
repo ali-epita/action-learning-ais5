@@ -83,6 +83,7 @@ class PointCastConfig:
     enable_tasks: bool = False
     use_deep_links: bool = False  # prefer a recipe's macOS settings deep-link over clicking, when present
     task_preview_ms: int = 800  # show each step's crosshair this long before clicking (lets the user abort)
+    recipes_path: str | None = None  # where recorded recipes are stored (None = ~/.pointcast/recipes.json)
 
     # ── safety ───────────────────────────────────────────────────────────────
     dry_run: bool = False  # if True, never dispatch a real OS click (log instead)

@@ -97,6 +97,12 @@ class Controller(QtCore.QObject):
         self._recording = False
         self._record_trigger: str | None = None  # "ptt" | "button" — who started recording
         self._task_runner: Any = None  # active multi-step TaskRunner, if any
+        self._demo: dict[str, Any] | None = None  # active record-by-demonstration session
+        self._recipes: tuple = ()  # built-in + user recipes (loaded when task mode is on)
+        if cfg.enable_tasks:
+            from .task import all_recipes
+
+            self._recipes = all_recipes(cfg.recipes_path)
 
         self.connect_widgets()
 
@@ -138,13 +144,23 @@ class Controller(QtCore.QObject):
             return  # ignore Enter while a dictation is in progress
         self._target = text
         _log.info("target received: %r", text)
-        if self.cfg.enable_tasks:  # multi-step task mode (single-click still works for everything else)
-            from .task import match_recipe
-            recipe = match_recipe(text)
-            if recipe is not None:
-                _log.info("matched task recipe: %s", recipe.name)
-                self._start_task(recipe)
+        if self.cfg.enable_tasks:  # task mode: commands, recording, recipes (single-click still works)
+            from .task import match_recipe, parse_command
+
+            cmd = parse_command(text)
+            if cmd is not None:
+                self._handle_record_command(*cmd)
                 return
+            if self._demo is not None:
+                # demonstrating: capture this step's phrase, then click it normally
+                self._demo["steps"].append(text)
+                _log.info("recorded step %d: %r", len(self._demo["steps"]), text)
+            else:
+                recipe = match_recipe(text, self._recipes)
+                if recipe is not None:
+                    _log.info("matched task recipe: %s", recipe.name)
+                    self._start_task(recipe)
+                    return
         self.input_bar.dismiss()
         self.overlay.clear()
         self.hud.dismiss()
@@ -182,6 +198,9 @@ class Controller(QtCore.QObject):
         self._logical_size = mapper.logical_size
         if result.point is None:
             _log.info("no match - refusing and asking again")
+            if self._demo is not None and self._demo["steps"]:
+                dropped = self._demo["steps"].pop()  # could not ground -> not a valid recorded step
+                _log.info("dropped unrecordable step %r", dropped)
             self._busy = False
             self.speaker.speak("I couldn't find that. Try describing it differently.")
             self.start_interaction()
@@ -381,6 +400,40 @@ class Controller(QtCore.QObject):
         self._record_trigger = None
         self.input_bar.set_state("idle")
         _log.error("transcription failed: %s", msg)
+
+    # ── record-by-demonstration ──────────────────────────────────────────────
+    def _handle_record_command(self, kind: str, name: str | None) -> None:
+        if kind == "record":
+            self._demo = {"name": name, "steps": []}
+            self.input_bar.dismiss()
+            _log.info("recording recipe %r", name)
+            self.speaker.speak(f"Recording {name}. Show me each step, then say save recipe.")
+            self.status.show_status(f"Recording: {name}  (say 'save recipe' when done)")
+            return
+        if kind == "cancel":
+            self._demo = None
+            self.status.dismiss()
+            self.speaker.speak("Recording cancelled.")
+            return
+        # kind == "save"
+        demo = self._demo
+        self._demo = None
+        if not demo or not demo["steps"]:
+            self.status.dismiss()
+            self.speaker.speak("Nothing to save yet.")
+            return
+        from .task import Recipe, Step, all_recipes, save_user_recipe
+
+        recipe = Recipe(name=demo["name"], utterances=(demo["name"].lower(),),
+                        steps=tuple(Step(target=t) for t in demo["steps"]))
+        try:
+            save_user_recipe(recipe, self.cfg.recipes_path)
+            self._recipes = all_recipes(self.cfg.recipes_path)  # make it matchable now
+            self.speaker.speak(f"Saved {recipe.name} with {len(recipe.steps)} steps.")
+            self.status.show_status(f"Saved: {recipe.name}")
+        except Exception as e:  # noqa: BLE001
+            _log.error("could not save recipe: %r", e)
+            self.speaker.speak("I could not save that recipe.")
 
     # ── multi-step task mode (Stage 1) ───────────────────────────────────────
     def _start_task(self, recipe) -> None:

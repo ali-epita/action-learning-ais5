@@ -192,6 +192,37 @@ def main() -> int:
         failures.append(f"voice: expected click at (640,400) after Enter, got {recv.calls}")
     ctlv.shutdown()
 
+    # ── scenario 5: record-by-demonstration -> save -> matchable ──
+    import os
+    import tempfile
+
+    recpath = os.path.join(tempfile.mkdtemp(), "recipes.json")
+    cfg_r = PointCastConfig(
+        dry_run=True, tts_engine="off", countdown_seconds=0.2, speak_locator=False,
+        enable_tasks=True, recipes_path=recpath,
+    )
+    ctlr = controller_mod.Controller(cfg_r, StubEngine(GroundResult(point=(300, 300), accepted=True, badge="locked")))
+    ctlr.clicker = RecClicker()
+    ctlr.on_target("record open thing")
+    if ctlr._demo is None or ctlr._demo["name"] != "open thing":
+        failures.append("record: did not start a demo session")
+    ctlr.on_target("the first button")  # demonstrate one step
+    pump(app, 700)  # the step is also clicked (capture + ground + countdown)
+    if ctlr._demo is None or ctlr._demo["steps"] != ["the first button"]:
+        failures.append(f"record: step not captured ({ctlr._demo})")
+    ctlr.on_target("save recipe")
+    if ctlr._demo is not None:
+        failures.append("record: demo not cleared after save")
+    from ais5.pointcast.task import all_recipes, load_user_recipes, match_recipe
+
+    saved = load_user_recipes(recpath)
+    if not (len(saved) == 1 and saved[0].name == "open thing"
+            and [s.target for s in saved[0].steps] == ["the first button"]):
+        failures.append(f"record: saved recipe wrong ({saved})")
+    if match_recipe("open thing", all_recipes(recpath)) is None:
+        failures.append("record: saved recipe not matchable after save")
+    ctlr.shutdown()
+
     if failures:
         print("SELF-TEST FAILED")
         for f in failures:

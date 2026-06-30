@@ -109,9 +109,26 @@ curated recipe, not a runtime planner, which keeps it reliable and fits the 3B
 model on 8 GB. Press the hotkey during a task to cancel it; in `--dry-run` it
 narrates and shows each crosshair without clicking.
 
-Recipes live in `src/ais5/pointcast/task/recipes.py` (add your own there). Where
-macOS exposes a settings deep-link, `--deep-links` jumps straight to the pane
-instead of clicking through.
+Built-in recipes (`src/ais5/pointcast/task/recipes.py`): check storage, check
+battery, check wifi. Where macOS exposes a settings deep-link, `--deep-links`
+jumps straight to the pane instead of clicking through.
+
+### Record your own (record-by-demonstration)
+
+Instead of hand-writing a recipe, demonstrate it once and PointCast remembers it:
+
+1. Say or type **"record &lt;name&gt;"** (e.g. "record open mail"). PointCast starts
+   recording.
+2. Do the steps normally (hotkey, name each target, it clicks). Each successful
+   click is captured as a step; a target it cannot find is not recorded.
+3. Say or type **"save recipe"** (or "done recording"). It is saved and is
+   immediately usable by name.
+
+Recordings are stored as JSON at `~/.pointcast/recipes.json` (set with
+`recipes_path`) and merged with the built-ins at startup; a recording reuses your
+target phrases and re-grounds them each run, so it survives small UI changes.
+This is the recommended way to add multi-step tasks on 8 GB: no planner model,
+and no guessing at target phrasings.
 
 ## Useful flags
 

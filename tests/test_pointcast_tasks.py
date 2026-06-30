@@ -18,6 +18,8 @@ from ais5.pointcast.task.recipes import Recipe, Step
 def test_intent_matches_storage_phrases():
     assert match_recipe("how much free storage do i have").name == "check storage"
     assert match_recipe("what's my disk space").name == "check storage"
+    assert match_recipe("check my storage").name == "check storage"
+    assert match_recipe("check storage").name == "check storage"
 
 
 def test_intent_matches_battery_and_wifi():

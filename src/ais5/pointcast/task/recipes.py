@@ -30,6 +30,7 @@ class Recipe:
 CHECK_STORAGE = Recipe(
     name="check storage",
     utterances=(
+        "check storage", "check my storage", "my storage",
         "how much free storage", "how much storage", "free storage",
         "storage space", "disk space", "free space", "free disk", "storage left",
     ),

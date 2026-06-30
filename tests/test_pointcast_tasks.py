@@ -72,12 +72,13 @@ def _capture():
 
 
 def _recorder():
-    r = {"status": [], "say": [], "point": [], "answer": [], "failed": [], "clear": 0, "done": 0}
+    r = {"status": [], "say": [], "point": [], "answer": [], "failed": [], "clear": 0, "hide": 0, "done": 0}
     cb = TaskCallbacks(
         status=r["status"].append,
         say=r["say"].append,
         point=lambda x, y: r["point"].append((x, y)),
         clear=lambda: r.__setitem__("clear", r["clear"] + 1),
+        hide=lambda: r.__setitem__("hide", r["hide"] + 1),
         answer=r["answer"].append,
         failed=r["failed"].append,
         done=lambda: r.__setitem__("done", r["done"] + 1),
@@ -91,7 +92,7 @@ RECIPE = Recipe(name="t", utterances=("t",),
 
 
 def test_runner_navigates_clicks_and_reads_answer():
-    cfg = PointCastConfig(task_preview_ms=0)  # real clicks, no waits
+    cfg = PointCastConfig(task_preview_ms=0, task_capture_hide_ms=0)  # real clicks, no waits
     eng, clk = StubEngine(), RecClicker()
     r, cb = _recorder()
     TaskRunner(cfg, eng, clk, cb, capture_fn=_capture, focus_fn=None).run(RECIPE)
@@ -99,11 +100,12 @@ def test_runner_navigates_clicks_and_reads_answer():
     assert clk.calls == [(100.0, 100.0), (100.0, 100.0)]
     assert r["answer"] == ["You have 120 GB available."]
     assert eng.ask_calls == ["how much free space?"]
+    assert r["hide"] == 3  # overlays hidden before each of the 2 steps + the read-back
     assert r["done"] == 1 and not r["failed"]
 
 
 def test_runner_stops_on_uncertain_step():
-    cfg = PointCastConfig(task_preview_ms=0)
+    cfg = PointCastConfig(task_preview_ms=0, task_capture_hide_ms=0)
     eng, clk = StubEngine(accepted=False), RecClicker()
     r, cb = _recorder()
     TaskRunner(cfg, eng, clk, cb, capture_fn=_capture, focus_fn=None).run(RECIPE)
@@ -113,7 +115,7 @@ def test_runner_stops_on_uncertain_step():
 
 
 def test_runner_dry_run_does_not_click():
-    cfg = PointCastConfig(task_preview_ms=0, dry_run=True)
+    cfg = PointCastConfig(task_preview_ms=0, task_capture_hide_ms=0, dry_run=True)
     eng, clk = StubEngine(), RecClicker()
     r, cb = _recorder()
     TaskRunner(cfg, eng, clk, cb, capture_fn=_capture, focus_fn=None).run(RECIPE)
@@ -123,7 +125,7 @@ def test_runner_dry_run_does_not_click():
 
 
 def test_runner_deep_link_skips_clicking():
-    cfg = PointCastConfig(task_preview_ms=0, dry_run=True, use_deep_links=True)
+    cfg = PointCastConfig(task_preview_ms=0, task_capture_hide_ms=0, dry_run=True, use_deep_links=True)
     eng, clk = StubEngine(), RecClicker()
     r, cb = _recorder()
     recipe = Recipe(name="d", utterances=("d",), steps=(Step("x"),),

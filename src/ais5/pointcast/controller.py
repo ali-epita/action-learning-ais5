@@ -47,6 +47,7 @@ class _Bridge(QtCore.QObject):
     task_say = QtCore.Signal(str)
     task_point = QtCore.Signal(object)  # (lx, ly)
     task_clear = QtCore.Signal()
+    task_hide = QtCore.Signal()  # hide all overlays before a screenshot
     task_answer = QtCore.Signal(str)
     task_failed = QtCore.Signal(str)
     task_done = QtCore.Signal()
@@ -85,6 +86,7 @@ class Controller(QtCore.QObject):
         self.sig.task_say.connect(self.on_task_say)
         self.sig.task_point.connect(self.on_task_point)
         self.sig.task_clear.connect(self.on_task_clear)
+        self.sig.task_hide.connect(self.on_task_hide)
         self.sig.task_answer.connect(self.on_task_answer)
         self.sig.task_failed.connect(self.on_task_failed)
         self.sig.task_done.connect(self.on_task_done)
@@ -450,6 +452,7 @@ class Controller(QtCore.QObject):
             say=self.sig.task_say.emit,
             point=lambda x, y: self.sig.task_point.emit((x, y)),
             clear=self.sig.task_clear.emit,
+            hide=self.sig.task_hide.emit,
             answer=self.sig.task_answer.emit,
             failed=self.sig.task_failed.emit,
             done=self.sig.task_done.emit,
@@ -479,6 +482,17 @@ class Controller(QtCore.QObject):
     @QtCore.Slot()
     def on_task_clear(self) -> None:
         self.overlay.clear()
+
+    @QtCore.Slot()
+    def on_task_hide(self) -> None:
+        # hide every PointCast window so the next task screenshot sees only the
+        # real screen, not our status banner or crosshair (which the model would
+        # otherwise try to click)
+        self.status.dismiss()
+        self.overlay.clear()
+        self.hud.dismiss()
+        self.disambig.dismiss()
+        self.input_bar.dismiss()
 
     @QtCore.Slot(str)
     def on_task_answer(self, text: str) -> None:

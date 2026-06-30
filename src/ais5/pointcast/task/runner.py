@@ -32,6 +32,7 @@ class TaskCallbacks:
     say: Callable[[str], None] = _noop  # spoken narration
     point: Callable[[float, float], None] = _noop  # show the step crosshair
     clear: Callable[[], None] = _noop  # clear the crosshair
+    hide: Callable[[], None] = _noop  # hide ALL of PointCast's overlays before a screenshot
     answer: Callable[[str], None] = _noop  # final answer read off the screen
     failed: Callable[[str], None] = _noop  # task aborted / could not continue
     done: Callable[[], None] = _noop  # always fires last (reset busy state)
@@ -77,14 +78,21 @@ class TaskRunner:
             self._answer(recipe.question)
         self.cb.status("Done")
 
+    def _grab(self):
+        """Hide PointCast's own overlays, let them disappear, then screenshot, so
+        the model grounds your screen and never our status banner or crosshair."""
+        self.cb.hide()
+        self._sleep_ms(self.cfg.task_capture_hide_ms)
+        return self._capture()
+
     def _navigate(self, recipe: Recipe) -> bool:
         n = len(recipe.steps)
         for i, step in enumerate(recipe.steps, start=1):
             if self._aborted:
                 self.cb.status("Cancelled")
                 return False
+            frame = self._grab()  # clean screenshot (our overlays hidden)
             self.cb.status(f"Step {i} of {n}: {step.target}")
-            frame = self._capture()
             res = self.engine.ground(frame.image, step.target)
             if res.point is None or not res.accepted:
                 _log.info("    step %d uncertain for %r (accepted=%s)", i, step.target, res.accepted)
@@ -113,8 +121,8 @@ class TaskRunner:
         self._sleep_ms(1200)
 
     def _answer(self, question: str) -> None:
+        frame = self._grab()  # clean screenshot for the read-back too
         self.cb.status("Reading the screen")
-        frame = self._capture()
         text = (self.engine.ask(frame.image, question) or "").strip()
         if text:
             _log.info("    answer: %s", text)

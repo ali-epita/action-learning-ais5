@@ -28,6 +28,8 @@ def main() -> int:
     ap.add_argument("--stt-model", default="whisper-large-v3-turbo-asr-fp16")
     ap.add_argument("--ground-max-side", type=int, default=1512)
     ap.add_argument("--try-twice", action="store_true", help="enable crop-then-click retry")
+    ap.add_argument("--tasks", action="store_true", help="enable multi-step task recipes (off = run single-shot as is)")
+    ap.add_argument("--deep-links", action="store_true", help="prefer macOS settings deep-links over clicking when a recipe has one")
     ap.add_argument("--dry-run", action="store_true", help="never dispatch a real OS click")
     ap.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ...")
     ap.add_argument("--log-file", default=None, help="also write logs to this rotating file")
@@ -42,6 +44,8 @@ def main() -> int:
         tts_engine=a.tts,
         ground_max_side=a.ground_max_side,
         use_try_twice=a.try_twice,
+        enable_tasks=a.tasks,
+        use_deep_links=a.deep_links,
         dry_run=a.dry_run,
         enable_voice=a.voice,
         enable_ptt_key=a.ptt,

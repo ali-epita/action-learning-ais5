@@ -47,6 +47,17 @@ class GroundingBackend(GUIModel):
         ``.parsed.point`` is in image-pixel coordinates."""
         ...
 
+    # ── free-form VQA / planning (optional) ──────────────────────────────────
+    def ask(self, image: Image, prompt: str, *, max_tokens: int = 128) -> str:
+        """Free-form question about ``image`` → raw answer text.
+
+        Unlike ``predict`` this sends ``prompt`` verbatim (no click-prompt
+        wrapper) and does no click parsing, so the same on-device model can read
+        a value off the screen (e.g. "how much free storage is shown?"). Backends
+        that cannot do this should leave the default, which raises.
+        """
+        raise NotImplementedError(f"{self.backend_id} backend does not support ask()")
+
     # ── lifecycle ────────────────────────────────────────────────────────────
     def load(self) -> GroundingBackend:
         """Eagerly load weights (otherwise loaded lazily on first predict)."""

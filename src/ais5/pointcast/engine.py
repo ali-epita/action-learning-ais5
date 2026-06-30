@@ -46,6 +46,12 @@ class GroundingEngine:
         except Exception:
             pass
 
+    def ask(self, image: Image.Image, prompt: str, *, max_tokens: int = 128) -> str:
+        """Free-form question about the screen (read a value, verify a screen).
+        Used by multi-step tasks to answer the user's question from the final
+        screen with the same on-device model."""
+        return self.backend.ask(image, prompt, max_tokens=max_tokens)
+
     def ground(self, image: Image.Image, instruction: str) -> GroundResult:
         if self.cfg.use_try_twice:
             return self._ground_try_twice(image, instruction)

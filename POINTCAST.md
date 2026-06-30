@@ -91,6 +91,28 @@ unavailable, voice fails gracefully and you can always type.
 Right Control; change with `--ptt-key`). It is off by default — the mic button is
 the trigger.
 
+## Task mode (multi-step, optional)
+
+By default the app runs "as is": one request, one click. Add `--tasks` and the
+app also handles short multi-step goals, while ordinary single-click requests
+still work, so both modes are available at once.
+
+```bash
+.venv-demo/bin/python -m ais5.pointcast --tasks --voice    # single-click AND multi-step
+```
+
+Say or type a goal like "how much free storage do I have". A matching **recipe**
+runs a short, fixed sequence (Settings, then General, then Storage), grounding
+each step with the same on-device model, then reads the answer off the final
+screen and **speaks it** ("you have 120 GB available"). The procedure is a
+curated recipe, not a runtime planner, which keeps it reliable and fits the 3B
+model on 8 GB. Press the hotkey during a task to cancel it; in `--dry-run` it
+narrates and shows each crosshair without clicking.
+
+Recipes live in `src/ais5/pointcast/task/recipes.py` (add your own there). Where
+macOS exposes a settings deep-link, `--deep-links` jumps straight to the pane
+instead of clicking through.
+
 ## Useful flags
 
 | Flag | Default | Notes |
@@ -104,6 +126,8 @@ the trigger.
 | `--ptt-key ctrl_r` | `ctrl_r` | which hold-to-talk key when `--ptt` is set |
 | `--ground-max-side 1512` | 1512 | downscale the screen before grounding (lower = faster, less precise) |
 | `--try-twice` | off | enable the full Try-Twice retry ladder (~2 calls, ~18s) |
+| `--tasks` | off | enable multi-step task recipes (off = single-shot as is) |
+| `--deep-links` | off | prefer a recipe's macOS settings deep-link over clicking, when present |
 | `--hotkey "<cmd>+<shift>+p"` | `<alt>+<space>` | pynput GlobalHotKeys syntax |
 
 ## Notes / known characteristics

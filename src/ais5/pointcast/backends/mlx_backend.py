@@ -126,6 +126,26 @@ class MLXBackend(GroundingBackend):
                 meta[attr] = val
         return ModelOutput(text=text, parsed=parsed, metadata=meta)
 
+    def ask(self, image: Image, prompt: str, *, max_tokens: int = 128) -> str:
+        """Free-form VQA: send ``prompt`` as-is (no click wrapper), return text."""
+        if self._model is None:
+            self.load()
+        from mlx_vlm import generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        img = image.convert("RGB")
+        path = self._image_to_path(img)
+        formatted = apply_chat_template(self._processor, self._config, prompt, num_images=1)
+        t0 = time.perf_counter()
+        res = generate(
+            self._model, self._processor, formatted, image=[path],
+            max_tokens=max_tokens, temperature=0.0, verbose=False,
+        )
+        text = getattr(res, "text", str(res)) or ""
+        self.last_result = res
+        _log.info("    ask (%dx%d): %.1fs -> %r", img.size[0], img.size[1], time.perf_counter() - t0, text[:80])
+        return text.strip()
+
     # ── trust-panel hooks ────────────────────────────────────────────────────
     def peak_memory_bytes(self) -> int | None:
         try:

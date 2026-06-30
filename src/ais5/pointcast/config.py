@@ -75,6 +75,15 @@ class PointCastConfig:
     activate_target_window: bool = True
     activate_settle_ms: int = 180  # wait after activating, before the click lands
 
+    # ── task mode (multi-step recipes) ───────────────────────────────────────
+    # Off by default: the app runs "as is" (single-shot grounding, one click per
+    # request). With it on, a request that matches a recipe (e.g. "how much free
+    # storage") runs a short multi-step sequence and speaks the answer, while
+    # everything else still single-clicks — so both modes are available at once.
+    enable_tasks: bool = False
+    use_deep_links: bool = False  # prefer a recipe's macOS settings deep-link over clicking, when present
+    task_preview_ms: int = 800  # show each step's crosshair this long before clicking (lets the user abort)
+
     # ── safety ───────────────────────────────────────────────────────────────
     dry_run: bool = False  # if True, never dispatch a real OS click (log instead)
 

@@ -42,6 +42,14 @@ class _Bridge(QtCore.QObject):
     stt_done = QtCore.Signal(str)
     stt_failed = QtCore.Signal(str)
     warmed = QtCore.Signal(float)  # seconds
+    # multi-step task mode (emitted from the inference thread, handled on the UI thread)
+    task_status = QtCore.Signal(str)
+    task_say = QtCore.Signal(str)
+    task_point = QtCore.Signal(object)  # (lx, ly)
+    task_clear = QtCore.Signal()
+    task_answer = QtCore.Signal(str)
+    task_failed = QtCore.Signal(str)
+    task_done = QtCore.Signal()
 
 
 class Controller(QtCore.QObject):
@@ -73,6 +81,13 @@ class Controller(QtCore.QObject):
         self.sig.stt_done.connect(self.on_transcribed)
         self.sig.stt_failed.connect(self.on_transcribe_failed)
         self.sig.warmed.connect(lambda s: _log.info("model warm and ready in %.0fs", s))
+        self.sig.task_status.connect(self.on_task_status)
+        self.sig.task_say.connect(self.on_task_say)
+        self.sig.task_point.connect(self.on_task_point)
+        self.sig.task_clear.connect(self.on_task_clear)
+        self.sig.task_answer.connect(self.on_task_answer)
+        self.sig.task_failed.connect(self.on_task_failed)
+        self.sig.task_done.connect(self.on_task_done)
 
         self._target = ""
         self._pending: tuple[float, float] | None = None  # logical click point
@@ -81,6 +96,7 @@ class Controller(QtCore.QObject):
         self._busy = False
         self._recording = False
         self._record_trigger: str | None = None  # "ptt" | "button" — who started recording
+        self._task_runner: Any = None  # active multi-step TaskRunner, if any
 
         self.connect_widgets()
 
@@ -103,6 +119,10 @@ class Controller(QtCore.QObject):
     @QtCore.Slot()
     def start_interaction(self) -> None:
         if self._busy:
+            if self._task_runner is not None:  # hotkey during a task = cancel it
+                _log.info("hotkey during a task: aborting")
+                self._task_runner.abort()
+                return
             _log.info("hotkey ignored (an interaction is already in progress)")
             return
         _log.info("interaction start: showing input bar")
@@ -118,6 +138,13 @@ class Controller(QtCore.QObject):
             return  # ignore Enter while a dictation is in progress
         self._target = text
         _log.info("target received: %r", text)
+        if self.cfg.enable_tasks:  # multi-step task mode (single-click still works for everything else)
+            from .task import match_recipe
+            recipe = match_recipe(text)
+            if recipe is not None:
+                _log.info("matched task recipe: %s", recipe.name)
+                self._start_task(recipe)
+                return
         self.input_bar.dismiss()
         self.overlay.clear()
         self.hud.dismiss()
@@ -354,6 +381,70 @@ class Controller(QtCore.QObject):
         self._record_trigger = None
         self.input_bar.set_state("idle")
         _log.error("transcription failed: %s", msg)
+
+    # ── multi-step task mode (Stage 1) ───────────────────────────────────────
+    def _start_task(self, recipe) -> None:
+        self.input_bar.dismiss()
+        self.overlay.clear()
+        self.hud.dismiss()
+        self.disambig.dismiss()
+        self._busy = True
+        from .task import TaskCallbacks, TaskRunner
+        from .window_focus import focus_window_at
+
+        cb = TaskCallbacks(
+            status=self.sig.task_status.emit,
+            say=self.sig.task_say.emit,
+            point=lambda x, y: self.sig.task_point.emit((x, y)),
+            clear=self.sig.task_clear.emit,
+            answer=self.sig.task_answer.emit,
+            failed=self.sig.task_failed.emit,
+            done=self.sig.task_done.emit,
+        )
+        self._task_runner = TaskRunner(
+            self.cfg, self.engine, self.clicker, cb,
+            focus_fn=(None if self.cfg.dry_run else focus_window_at),
+        )
+        _log.info("starting task: %s", recipe.name)
+        self._infer.submit(self._task_runner.run, recipe)
+
+    @QtCore.Slot(str)
+    def on_task_status(self, text: str) -> None:
+        _log.info("task: %s", text)
+        self.status.show_status(text)
+
+    @QtCore.Slot(str)
+    def on_task_say(self, text: str) -> None:
+        if self.cfg.speak_locator:
+            self.speaker.speak(text)
+
+    @QtCore.Slot(object)
+    def on_task_point(self, p: object) -> None:
+        lx, ly = p  # type: ignore[misc]
+        self.overlay.show_point(lx, ly)
+
+    @QtCore.Slot()
+    def on_task_clear(self) -> None:
+        self.overlay.clear()
+
+    @QtCore.Slot(str)
+    def on_task_answer(self, text: str) -> None:
+        _log.info("task answer: %s", text)
+        self.overlay.clear()
+        self.status.show_status(text)
+        self.speaker.speak(text)
+
+    @QtCore.Slot(str)
+    def on_task_failed(self, msg: str) -> None:
+        _log.error("task failed: %s", msg)
+        self.overlay.clear()
+
+    @QtCore.Slot()
+    def on_task_done(self) -> None:
+        self._task_runner = None
+        self._busy = False
+        self.overlay.clear()
+        QtCore.QTimer.singleShot(6000, self.status.dismiss)  # let the answer linger, then clear
 
     # ── teardown ─────────────────────────────────────────────────────────────
     @QtCore.Slot()

@@ -25,6 +25,7 @@ from ...utils.logging import get_logger
 from .base import DEFAULT_MAX_TOKENS, GroundingBackend
 
 DEFAULT_MODEL_PATH = "mlx-qwen-r64-4bit"
+DEFAULT_CACHE_LIMIT_MB = 384  # cap MLX's reusable buffer cache (8 GB-friendly)
 _log = get_logger("pointcast.mlx")
 
 
@@ -36,9 +37,11 @@ class MLXBackend(GroundingBackend):
     param_count_b = 3.0
     family = "generalist"
 
-    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, *, max_tokens: int = DEFAULT_MAX_TOKENS):
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, *, max_tokens: int = DEFAULT_MAX_TOKENS,
+                 cache_limit_mb: int = DEFAULT_CACHE_LIMIT_MB):
         self.model_path = model_path
         self.default_max_tokens = max_tokens
+        self.cache_limit_mb = cache_limit_mb
         self._model: Any = None
         self._processor: Any = None
         self._config: Any = None
@@ -59,7 +62,24 @@ class MLXBackend(GroundingBackend):
             from mlx_vlm.utils import load_config
 
             self._config = load_config(self.model_path)
+        try:  # bound MLX's reusable buffer cache so it cannot grow unbounded on 8 GB
+            import mlx.core as mx
+
+            mx.set_cache_limit(self.cache_limit_mb * 1024 * 1024)
+        except Exception:  # noqa: BLE001
+            pass
         return self
+
+    def _reclaim(self) -> None:
+        """Return MLX's freed buffers to the OS after each call so memory does not
+        creep up across the many calls in a task (the cause of the Metal OOM on
+        8 GB, especially while screen-sharing)."""
+        try:
+            import mlx.core as mx
+
+            mx.clear_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
         import shutil
@@ -124,6 +144,7 @@ class MLXBackend(GroundingBackend):
             val = getattr(res, attr, None)
             if val is not None:
                 meta[attr] = val
+        self._reclaim()
         return ModelOutput(text=text, parsed=parsed, metadata=meta)
 
     def ask(self, image: Image, prompt: str, *, max_tokens: int = 128) -> str:
@@ -144,6 +165,7 @@ class MLXBackend(GroundingBackend):
         text = getattr(res, "text", str(res)) or ""
         self.last_result = res
         _log.info("    ask (%dx%d): %.1fs -> %r", img.size[0], img.size[1], time.perf_counter() - t0, text[:80])
+        self._reclaim()
         return text.strip()
 
     # ── trust-panel hooks ────────────────────────────────────────────────────

@@ -80,4 +80,27 @@ CHECK_WIFI = Recipe(
     ),
 )
 
-RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE, CHECK_BATTERY, CHECK_WIFI)
+# A multi-app web task. Target phrasings were each validated against real
+# screenshots of the steps (the grounder landed on the right element for all 5).
+CHECK_KAGGLE_GRADE = Recipe(
+    name="check kaggle grade",
+    utterances=(
+        "kaggle week grade", "kaggle grade", "my kaggle grade", "kaggle week 2 grade",
+        "check my kaggle", "ais kaggle grade", "kaggle week",
+    ),
+    steps=(
+        Step(target="the Google Chrome icon in the Dock", say="Opening Chrome", settle_ms=1600),
+        Step(target="the Student Profile Page bookmark in the bookmarks bar",
+             say="Opening the student profile", settle_ms=2200),
+        Step(target="Attendance in the left sidebar", say="Opening Attendance", settle_ms=2000),
+        Step(target="the Choose Courselist dropdown for Spring 2026",
+             say="Opening the Spring 2026 course list", settle_ms=1100),
+        Step(target="AIS Kaggle Week 2 S2 in the list", say="Selecting AIS Kaggle Week 2", settle_ms=2200),
+    ),
+    question=(
+        "This is the EPITA student page for the AIS Kaggle Week 2 course. What is the grade, "
+        "score, or attendance shown for it? Answer in one short sentence."
+    ),
+)
+
+RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE, CHECK_BATTERY, CHECK_WIFI, CHECK_KAGGLE_GRADE)

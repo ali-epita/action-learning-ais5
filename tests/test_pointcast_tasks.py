@@ -26,6 +26,11 @@ def test_intent_matches_battery_and_wifi():
     assert match_recipe("check wifi").name == "check wifi"
 
 
+def test_intent_matches_kaggle_grade():
+    assert match_recipe("check my kaggle week grade").name == "check kaggle grade"
+    assert match_recipe("what's my kaggle grade").name == "check kaggle grade"
+
+
 def test_intent_ignores_ordinary_targets():
     assert match_recipe("click the search box") is None
     assert match_recipe("the send button") is None

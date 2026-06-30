@@ -113,6 +113,11 @@ Built-in recipes (`src/ais5/pointcast/task/recipes.py`): check storage, check
 battery, check wifi. Where macOS exposes a settings deep-link, `--deep-links`
 jumps straight to the pane instead of clicking through.
 
+To tune a recipe's target phrasing against your real UI, open the screen and run
+`scripts/pointcast_ground_test.py "your phrase"`: it grounds the phrase on the
+live screen, prints where it would click, and saves a crosshair preview, so you
+can reword until it lands right (`--list` shows the built-in targets).
+
 ### Record your own (record-by-demonstration)
 
 Instead of hand-writing a recipe, demonstrate it once and PointCast remembers it:

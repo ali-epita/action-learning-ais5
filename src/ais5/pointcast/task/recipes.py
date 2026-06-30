@@ -46,4 +46,38 @@ CHECK_STORAGE = Recipe(
     ),
 )
 
-RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE,)
+CHECK_BATTERY = Recipe(
+    name="check battery",
+    utterances=(
+        "battery percentage", "battery level", "battery health", "battery status",
+        "how much battery", "check battery", "my battery",
+    ),
+    steps=(
+        Step(target="the System Settings icon in the Dock", say="Opening Settings", settle_ms=1500),
+        Step(target="Battery in the settings sidebar", say="Opening Battery", settle_ms=1200),
+    ),
+    deep_link="x-apple.systempreferences:com.apple.settings.Battery",
+    question=(
+        "This is the macOS Battery settings screen. What is the current battery charge "
+        "percentage or battery health? Answer in one short sentence."
+    ),
+)
+
+CHECK_WIFI = Recipe(
+    name="check wifi",
+    utterances=(
+        "which wifi", "what wifi", "wifi network", "wifi status", "check wifi",
+        "am i connected", "which network", "wi-fi",
+    ),
+    steps=(
+        Step(target="the System Settings icon in the Dock", say="Opening Settings", settle_ms=1500),
+        Step(target="Wi-Fi in the settings sidebar", say="Opening Wi-Fi", settle_ms=1200),
+    ),
+    deep_link="x-apple.systempreferences:com.apple.wifi-settings-extension",
+    question=(
+        "This is the macOS Wi-Fi settings screen. Is Wi-Fi on, and which network is connected? "
+        "Answer in one short sentence."
+    ),
+)
+
+RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE, CHECK_BATTERY, CHECK_WIFI)

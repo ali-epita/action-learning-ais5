@@ -20,9 +20,16 @@ def test_intent_matches_storage_phrases():
     assert match_recipe("what's my disk space").name == "check storage"
 
 
+def test_intent_matches_battery_and_wifi():
+    assert match_recipe("what's my battery percentage").name == "check battery"
+    assert match_recipe("which wifi am i on").name == "check wifi"
+    assert match_recipe("check wifi").name == "check wifi"
+
+
 def test_intent_ignores_ordinary_targets():
     assert match_recipe("click the search box") is None
     assert match_recipe("the send button") is None
+    assert match_recipe("open the file menu") is None
     assert match_recipe("") is None
 
 

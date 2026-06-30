@@ -96,10 +96,11 @@ CHECK_KAGGLE_GRADE = Recipe(
         Step(target="the Choose Courselist dropdown for Spring 2026",
              say="Opening the Spring 2026 course list", settle_ms=1100),
         Step(target="AIS Kaggle Week 2 S2 in the list", say="Selecting AIS Kaggle Week 2", settle_ms=2200),
+        Step(target="the View Course Marks button", say="Opening the course marks", settle_ms=2200),
     ),
     question=(
-        "This is the EPITA student page for the AIS Kaggle Week 2 course. What is the grade, "
-        "score, or attendance shown for it? Answer in one short sentence."
+        "This page shows the course marks for AIS Kaggle Week 2. What is the grade or mark? "
+        "Answer in one short sentence."
     ),
 )
 

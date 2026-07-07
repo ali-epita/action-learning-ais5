@@ -154,6 +154,7 @@ def _load_os_copilot_screenspot_v2(repo_id: str) -> Iterator[GroundingSample]:
     ]
 
     idx = 0
+    skipped = 0
     with ZipFile(image_zip_path) as images:
         for json_path in json_paths:
             with open(json_path, encoding="utf-8") as f:
@@ -171,11 +172,19 @@ def _load_os_copilot_screenspot_v2(repo_id: str) -> Iterator[GroundingSample]:
                     bbox_format="xywh",
                 )
                 if sample is None:
+                    skipped += 1
                     continue
                 sample.extra.setdefault("requested_split", "test")
                 sample.extra.setdefault("loaded_split", "os-copilot-json")
                 yield sample
                 idx += 1
+    if skipped:
+        # Skipped rows silently shrink the accuracy denominator; make it visible.
+        warnings.warn(
+            f"Skipped {skipped} invalid screenspot-v2 rows (of {idx + skipped}) "
+            "with missing image/bbox.",
+            stacklevel=2,
+        )
 
 
 def load_screenspot_v2(

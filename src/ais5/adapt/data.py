@@ -246,14 +246,22 @@ class QwenVLGroundingCollator:
         user:      {image} + format_click_prompt(instruction)
         assistant: <click>x, y</click>
 
-    Calls the processor twice per example: once with the prompt only (to
-    locate the prefix length), once for the full conversation. Labels =
-    input_ids with the prefix and padding masked to `ignore_index`.
+    Labels = input_ids with the prompt prefix and padding masked to
+    `ignore_index`.
 
-    The two-pass tokenization is correct because the image expansion is
-    deterministic for a fixed image, so the prompt-only token count equals
-    the prefix length of the full sequence (right padding assumed, which is
-    the default for HF training).
+    Image preprocessing dominates collation cost, so each image goes through
+    the processor ONCE per example (the full conversation, which is also the
+    vision-shape validation pass). The prompt prefix length is derived without
+    a second image pass: the image's token expansion is the same in the
+    prompt-only and full tokenizations (deterministic for a fixed image), so
+
+        image_delta = len(full_with_image) - len(full_text_only)
+        prompt_len  = len(prompt_text_only) + image_delta
+
+    using the tokenizer alone for the two text-only lengths. At batch size 1
+    (the shipped config) the per-example tensors are reused directly and no
+    re-batching pass runs at all. Right padding is assumed, which is the
+    default for HF training.
     """
 
     def __init__(
@@ -348,27 +356,24 @@ class QwenVLGroundingCollator:
 
         return True
 
+    def _text_token_len(self, text: str) -> int:
+        """Token count of `text` via the tokenizer alone (no image pass)."""
+        tok = getattr(self.processor, "tokenizer", None)
+        enc = tok(text)
+        ids = enc["input_ids"]
+        if ids and isinstance(ids[0], (list, tuple)):  # batched return shape
+            ids = ids[0]
+        return len(ids)
+
     def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
-        # Pass 1: per-example prompt-only length + validate visual-token count.
+        # One image pass per example: tokenize the FULL conversation (also the
+        # vision-shape validation), then derive the prompt prefix length from
+        # two cheap text-only tokenizations (see class docstring).
         valid_examples: list[GroundingTrainExample] = []
         prompt_lens: list[int] = []
+        full_texts: list[str] = []
+        per_example_tokens: list[dict[str, Any]] = []
         for ex in examples:
-            try:
-                msgs = self._build_messages(ex, with_answer=False)
-                prompt_text = self.processor.apply_chat_template(
-                    msgs, tokenize=False, add_generation_prompt=True
-                )
-                prompt_tokens = self.processor(
-                    text=[prompt_text],
-                    images=[ex.image],
-                    return_tensors="pt",
-                    padding=False,
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            if not self._valid_vision_shape(prompt_tokens):
-                continue
-
             try:
                 full_msgs = self._build_messages(ex, with_answer=True)
                 full_text = self.processor.apply_chat_template(
@@ -385,8 +390,20 @@ class QwenVLGroundingCollator:
             if not self._valid_vision_shape(full_tokens):
                 continue
 
+            try:
+                prompt_msgs = self._build_messages(ex, with_answer=False)
+                prompt_text = self.processor.apply_chat_template(
+                    prompt_msgs, tokenize=False, add_generation_prompt=True
+                )
+                image_delta = int(full_tokens["input_ids"].shape[1]) - self._text_token_len(full_text)
+                prompt_len = self._text_token_len(prompt_text) + image_delta
+            except Exception:  # noqa: BLE001
+                continue
+
             valid_examples.append(ex)
-            prompt_lens.append(int(prompt_tokens["input_ids"].shape[1]))
+            prompt_lens.append(prompt_len)
+            full_texts.append(full_text)
+            per_example_tokens.append(full_tokens)
 
         if not valid_examples:
             raise ValueError(
@@ -395,28 +412,21 @@ class QwenVLGroundingCollator:
                 "per_device_train_batch_size or tighten the adapter filter."
             )
 
-        # Pass 2: batch the full conversations for the survivors only.
-        full_texts: list[str] = []
-        images: list[Image] = []
-        for ex in valid_examples:
-            msgs = self._build_messages(ex, with_answer=True)
-            full_texts.append(
-                self.processor.apply_chat_template(
-                    msgs, tokenize=False, add_generation_prompt=False
+        if len(valid_examples) == 1:
+            # Shipped config (batch 1): reuse the tensors — no re-batching pass.
+            batch = dict(per_example_tokens[0])
+        else:
+            batch = self.processor(
+                text=full_texts,
+                images=[ex.image for ex in valid_examples],
+                return_tensors="pt",
+                padding=True,
+            )
+            if not self._valid_vision_shape(batch):
+                raise ValueError(
+                    "QwenVLGroundingCollator: the batched full conversation still "
+                    "has an invalid visual-token shape after per-example filtering."
                 )
-            )
-            images.append(ex.image)
-        batch = self.processor(
-            text=full_texts,
-            images=images,
-            return_tensors="pt",
-            padding=True,
-        )
-        if not self._valid_vision_shape(batch):
-            raise ValueError(
-                "QwenVLGroundingCollator: the batched full conversation still "
-                "has an invalid visual-token shape after per-example filtering."
-            )
 
         input_ids = batch["input_ids"]
         labels = input_ids.clone()

@@ -98,6 +98,11 @@ def run_lora_training(
         processor=base.processor,
         adapter=args.adapter,
     )
+    if args.skip_bad_vision_batches:
+        # At the shipped batch size of 1, a single bad row makes the collator
+        # raise and would abort a multi-hour run from inside the dataloader
+        # (compute_loss never sees it). Re-use the previous good batch instead.
+        collator = _resilient_collator(collator)
 
     output_dir = ensure_dir(args.output_dir)
     streaming = not hasattr(train_data, "__len__")
@@ -190,6 +195,32 @@ def _load_default_train_data(args: TrainingArgs) -> Dataset:
     )
     ds = load_dataset(args.train_dataset, split="train", streaming=True)
     return ds.take(args.train_subset_size)
+
+
+def _resilient_collator(collator: Any) -> Any:
+    """Wrap a collator so a batch where every row fails (ValueError) re-uses the
+    previous good batch instead of killing the training run. The duplicate step
+    is a negligible, logged bias; an abort throws away hours of GPU time. If the
+    very first batch fails there is nothing to fall back to, so it re-raises."""
+    state: dict[str, Any] = {"last": None, "skipped": 0}
+
+    def _call(rows: list[Any]) -> dict[str, Any]:
+        try:
+            batch = collator(rows)
+            state["last"] = batch
+            return batch
+        except ValueError as exc:
+            if state["last"] is None:
+                raise
+            state["skipped"] += 1
+            if state["skipped"] <= 5 or state["skipped"] % 25 == 0:
+                log.warning(
+                    "Collator failed on batch #%d (%s); re-using the previous good batch",
+                    state["skipped"], exc,
+                )
+            return state["last"]
+
+    return _call
 
 
 def _is_qwen_bad_vision_batch_error(exc: BaseException) -> bool:

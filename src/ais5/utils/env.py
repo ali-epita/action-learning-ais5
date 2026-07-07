@@ -22,11 +22,19 @@ def _on_colab() -> bool:
 def configure_caches(root: str | None = None) -> dict[str, str]:
     """Point HF and torch caches at `root`. Call before importing transformers.
 
-    Only sets vars that are currently unset, so an explicit HF_HOME wins.
+    Only sets vars that are currently unset, so an explicit HF_HOME wins —
+    including for the derived sub-caches: when HF_HOME is preset (e.g. pinned
+    to a RunPod volume), HF_HUB_CACHE/HF_DATASETS_CACHE default under IT, not
+    under the generic default root (huggingface_hub gives HF_HUB_CACHE
+    precedence, so deriving it from the wrong root would silently re-download
+    models outside the pinned volume).
     Defaults to /content/hf_cache on Colab, ~/.cache elsewhere.
     """
     if root is None:
-        root = "/content/hf_cache" if _on_colab() else os.path.expanduser("~/.cache")
+        root = (
+            os.environ.get("HF_HOME")
+            or ("/content/hf_cache" if _on_colab() else os.path.expanduser("~/.cache"))
+        )
     root = str(ensure_dir(root))
 
     layout = {

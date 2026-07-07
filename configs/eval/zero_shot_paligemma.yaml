@@ -1,0 +1,13 @@
+# Zero-shot PaliGemma-3B on ScreenSpot-V2 (shared baseline).
+seed: 42
+limit: null
+
+model:
+  name: paligemma-3b
+  kwargs:
+    device_map: auto
+    torch_dtype: auto
+    max_new_tokens: 64
+
+benchmark: screenspot-v2
+data: {}

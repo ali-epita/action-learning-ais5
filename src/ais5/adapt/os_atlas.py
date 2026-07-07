@@ -73,10 +73,15 @@ def _ensure_zip(repo_id: str, parts: list[str], cache_dir: str | None) -> str:
         return local[0]
     merged = Path(local[0]).with_suffix(".merged.zip")
     if not merged.exists():
-        with open(merged, "wb") as out:
+        # Write to a temp name and rename: an interrupted copy (preemption,
+        # Ctrl-C, OOM kill) must not leave a truncated file that `exists()`
+        # then treats as complete forever after.
+        tmp = merged.with_suffix(".merged.zip.tmp")
+        with open(tmp, "wb") as out:
             for part in local:
                 with open(part, "rb") as f:
                     shutil.copyfileobj(f, out)
+        tmp.replace(merged)
     return str(merged)
 
 

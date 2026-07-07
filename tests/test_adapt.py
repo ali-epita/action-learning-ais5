@@ -23,6 +23,12 @@ class _FakeTokenizer:
     eos_token = "<eos>"
     eos_token_id = 1
 
+    def __call__(self, text: str, **_kwargs) -> dict:
+        # Text-only tokenization: one token per character, mirroring the fake
+        # processor's scheme minus its 3 image tokens (the collator derives the
+        # image expansion as the difference between the two).
+        return {"input_ids": [(ord(c) % 90) + 10 for c in text]}
+
 
 class _FakeProcessor:
     """Minimal Qwen2.5-VL processor stand-in.
@@ -469,6 +475,35 @@ def test_qwen_collator_raises_when_every_example_is_bad():
     collator = QwenVLGroundingCollator(_AllTiny())
     with pytest.raises(ValueError, match="too few visual tokens"):
         collator([_make_example(instruction="A")])
+
+
+def test_resilient_collator_reuses_previous_batch_on_failure():
+    """At batch size 1, a single bad row must not abort a multi-hour run."""
+    from ais5.adapt.train import _resilient_collator
+
+    calls = {"n": 0}
+
+    def flaky(rows):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("every example in this batch produced too few visual tokens")
+        return {"input_ids": calls["n"]}
+
+    wrapped = _resilient_collator(flaky)
+    assert wrapped(["a"]) == {"input_ids": 1}
+    assert wrapped(["b"]) == {"input_ids": 1}  # failure: previous good batch re-used
+    assert wrapped(["c"]) == {"input_ids": 3}  # recovery: fresh batches again
+
+
+def test_resilient_collator_reraises_when_no_good_batch_yet():
+    from ais5.adapt.train import _resilient_collator
+
+    def always_bad(rows):
+        raise ValueError("bad")
+
+    wrapped = _resilient_collator(always_bad)
+    with pytest.raises(ValueError):
+        wrapped(["a"])
 
 
 # ── make_collator ────────────────────────────────────────────────────────────

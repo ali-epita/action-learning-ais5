@@ -1,0 +1,8 @@
+# Task 2 — resolution scaling + crop-then-click on ScreenSpot-Pro.
+# The orchestrator pairs this with the Task-1 r8 Qwen adapter (via --adapter).
+seed: 42
+model: qwen2.5-vl-3b
+benchmark: screenspot-pro
+scale: 0.5
+crop_size: 512
+crop_then_click: true

@@ -38,7 +38,13 @@ class TrainingArgs:
     fp16: bool = False
     logging_steps: int = 25
     save_steps: int = 1000
+    save_total_limit: int | None = 1  # cap on-disk checkpoints (None = keep all)
+    gradient_checkpointing: bool = False
     eval_steps: int | None = None
+    os_atlas_subsets: tuple[str, ...] | None = None  # only used for OS-Atlas-data
+    report_to: list[str] | None = None  # e.g. ["wandb"]; None -> no tracking
+    run_name: str | None = None  # tracker run name (W&B etc.)
+    skip_bad_vision_batches: bool = True
     seed: int = 42
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -63,7 +69,13 @@ def run_lora_training(
     set_global_seed(args.seed)
 
     log.info("Loading base model %s", model_name)
-    base = get_model(model_name)
+    # No device_map for training. Any device_map (even {'': 0}) gives the model
+    # an hf_device_map, which makes the HF Trainer/accelerate treat the run as
+    # "dispatched" and slice every input along dim 0 to the batch size. Qwen2.5-VL
+    # packs pixel_values as (num_patches, 1176) where dim 0 is patches, not batch,
+    # so it gets sliced to a single patch and the vision tower crashes. Loading
+    # plain lets the Trainer move the model to the GPU and never dispatch.
+    base = get_model(model_name, device_map=None)
     if base.model is None or base.processor is None:
         raise RuntimeError(
             f"{model_name} wrapper did not populate .model / .processor"
@@ -86,6 +98,11 @@ def run_lora_training(
         processor=base.processor,
         adapter=args.adapter,
     )
+    if args.skip_bad_vision_batches:
+        # At the shipped batch size of 1, a single bad row makes the collator
+        # raise and would abort a multi-hour run from inside the dataloader
+        # (compute_loss never sees it). Re-use the previous good batch instead.
+        collator = _resilient_collator(collator)
 
     output_dir = ensure_dir(args.output_dir)
     streaming = not hasattr(train_data, "__len__")
@@ -100,11 +117,20 @@ def run_lora_training(
         "fp16": args.fp16,
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "gradient_checkpointing": args.gradient_checkpointing,
         "eval_steps": args.eval_steps,
         "save_strategy": "steps",
-        "report_to": ["none"],
+        "report_to": args.report_to if args.report_to is not None else ["none"],
+        "run_name": args.run_name,
         "seed": args.seed,
         "remove_unused_columns": False,  # the collator needs raw dataset rows
+        # Streaming IterableDatasets make accelerate dispatch batches from the
+        # main process, slicing every input to the batch size on dim 0. Qwen2.5-VL
+        # packs pixel_values as (num_patches, 1176) where dim 0 is patches, so the
+        # slice corrupts the vision input. Disable dispatch so each process reads
+        # its own batches and pixel_values stays intact.
+        "accelerator_config": {"dispatch_batches": False},
         **args.extra,
     }
     if streaming:
@@ -121,7 +147,8 @@ def run_lora_training(
 
     training_args = TrainingArguments(**training_kwargs)
 
-    trainer = Trainer(
+    trainer_cls = _skip_bad_vision_trainer(Trainer) if args.skip_bad_vision_batches else Trainer
+    trainer = trainer_cls(
         model=peft_model,
         args=training_args,
         train_dataset=train_data,
@@ -131,18 +158,36 @@ def run_lora_training(
     trainer.train()
     peft_model.save_pretrained(str(output_dir))
     log.info("Saved LoRA adapter to %s", output_dir)
-    return Path(output_dir)
+
+    out_path = Path(output_dir)
+    # Free the training model's GPU memory before returning so the next load
+    # (eval, or the next rank) gets the whole device instead of offloading
+    # layers to CPU, which makes inference crawl.
+    from ..utils.env import free_model
+
+    del trainer, peft_model, base
+    free_model()
+    return out_path
 
 
 def _load_default_train_data(args: TrainingArgs) -> Dataset:
     """Load `train_subset_size` rows from `args.train_dataset`.
 
-    Streaming first: HF's sliced-split path (`train[:N]`) downloads whole
-    parquet shards regardless of N, which blows out Colab disk for datasets
-    like OS-Atlas-data (many GB per shard). Streaming + `.take` fetches rows
-    on demand and caches nothing. Returns an IterableDataset, which forces
-    `run_lora_training` to compute `max_steps` instead of using num_train_epochs.
+    OS-Atlas-data ships labels as separate per-domain JSONs that `load_dataset`
+    cannot pair to the image zips, so it routes through the custom
+    `os_atlas_dataset` loader. Everything else streams via HF: `.take(N)` fetches
+    rows on demand and caches nothing, returning an IterableDataset so
+    `run_lora_training` computes `max_steps` instead of using num_train_epochs.
     """
+    if args.train_dataset == "OS-Copilot/OS-Atlas-data":
+        from .os_atlas import DEFAULT_SUBSETS, os_atlas_dataset
+
+        subsets = args.os_atlas_subsets or DEFAULT_SUBSETS
+        log.info(
+            "Loading OS-Atlas subsets %s [first %d rows]", subsets, args.train_subset_size
+        )
+        return os_atlas_dataset(subsets, limit=args.train_subset_size)
+
     from datasets import load_dataset
 
     log.info(
@@ -150,3 +195,80 @@ def _load_default_train_data(args: TrainingArgs) -> Dataset:
     )
     ds = load_dataset(args.train_dataset, split="train", streaming=True)
     return ds.take(args.train_subset_size)
+
+
+def _resilient_collator(collator: Any) -> Any:
+    """Wrap a collator so a batch where every row fails (ValueError) re-uses the
+    previous good batch instead of killing the training run. The duplicate step
+    is a negligible, logged bias; an abort throws away hours of GPU time. If the
+    very first batch fails there is nothing to fall back to, so it re-raises."""
+    state: dict[str, Any] = {"last": None, "skipped": 0}
+
+    def _call(rows: list[Any]) -> dict[str, Any]:
+        try:
+            batch = collator(rows)
+            state["last"] = batch
+            return batch
+        except ValueError as exc:
+            if state["last"] is None:
+                raise
+            state["skipped"] += 1
+            if state["skipped"] <= 5 or state["skipped"] % 25 == 0:
+                log.warning(
+                    "Collator failed on batch #%d (%s); re-using the previous good batch",
+                    state["skipped"], exc,
+                )
+            return state["last"]
+
+    return _call
+
+
+def _is_qwen_bad_vision_batch_error(exc: BaseException) -> bool:
+    """True for Qwen2.5-VL's known bad-image spatial-merge crash."""
+    msg = str(exc)
+    return (
+        "shape '[0, 4, -1]' is invalid" in msg
+        or 'shape "[0, 4, -1]" is invalid' in msg
+    )
+
+
+def _zero_trainable_loss(model: Any) -> Any:
+    for param in model.parameters():
+        if getattr(param, "requires_grad", False):
+            return param.sum() * 0.0
+    for param in model.parameters():
+        return param.sum() * 0.0
+    raise RuntimeError("Cannot build zero loss for a model with no parameters")
+
+
+def _skip_bad_vision_trainer(base_cls: type) -> type:
+    """Return a Trainer subclass that skips Qwen malformed visual batches.
+
+    Some UGround rows still produce a Qwen vision-tower reshape crash after
+    processor-level validation, depending on the Colab transformers/torch path.
+    Treat those rare rows like corrupt training examples instead of aborting
+    the whole LoRA run.
+    """
+
+    class SkipBadVisionTrainer(base_cls):
+        _bad_vision_batches: int = 0
+
+        def compute_loss(self, model: Any, inputs: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+            try:
+                return super().compute_loss(model, inputs, *args, **kwargs)
+            except RuntimeError as exc:
+                if not _is_qwen_bad_vision_batch_error(exc):
+                    raise
+                self._bad_vision_batches += 1
+                if self._bad_vision_batches <= 5 or self._bad_vision_batches % 25 == 0:
+                    log.warning(
+                        "Skipping Qwen bad visual batch #%d: %s",
+                        self._bad_vision_batches,
+                        exc,
+                    )
+                loss = _zero_trainable_loss(model)
+                if kwargs.get("return_outputs"):
+                    return loss, {}
+                return loss
+
+    return SkipBadVisionTrainer

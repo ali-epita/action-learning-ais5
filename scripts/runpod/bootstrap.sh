@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# =============================================================================
+# AIS 5 — RunPod A100-80GB bootstrap
+#
+# Idempotent. Re-running it after a pod restart is safe and fast: it only
+# re-does work that is missing. Everything that must survive a pod restart
+# (uv, the HF cache, the HF token, the venv) is written to the PERSISTENT
+# network volume, NOT to the ephemeral container root.
+#
+# Usage (from inside the pod, repo already rsync'd to $REPO_DIR):
+#   export HF_TOKEN=hf_xxx            # or put it in $REPO_DIR/.env
+#   export WANDB_API_KEY=...          # optional
+#   bash scripts/runpod/bootstrap.sh
+#
+# Override the volume mountpoint if your pod uses something other than
+# /workspace:
+#   VOL=/runpod-volume bash scripts/runpod/bootstrap.sh
+# =============================================================================
+set -Eeuo pipefail
+
+# ── 0. Locations ─────────────────────────────────────────────────────────────
+# VOL  : the persistent network volume (survives pod stop/restart).
+# REPO : the rsync'd repo. If it lives on the volume it also persists; if it was
+#        rsync'd to /root it does NOT — re-rsync after a fresh pod.
+VOL="${VOL:-/workspace}"
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+# Caches/tools forced onto the volume so model + dataset downloads (the
+# expensive part) outlive any container churn.
+export UV_INSTALL_DIR="$VOL/.uv/bin"          # uv binary
+export UV_CACHE_DIR="$VOL/.uv/cache"          # uv wheel cache
+export UV_PYTHON_INSTALL_DIR="$VOL/.uv/python" # managed CPython 3.11
+export HF_HOME="$VOL/.hf_cache"               # HF hub blobs (models)
+export HF_DATASETS_CACHE="$VOL/.hf_cache/datasets"
+export HF_HUB_ENABLE_HF_TRANSFER=1            # fast parallel downloads
+# Keep the venv on the volume too so `uv sync` after a restart is a no-op.
+export UV_PROJECT_ENVIRONMENT="$VOL/.venv-ais5"
+
+mkdir -p "$VOL/.uv" "$HF_HOME" "$HF_DATASETS_CACHE" "$UV_PYTHON_INSTALL_DIR" \
+         "$REPO_DIR/results" "$REPO_DIR/checkpoints" "$REPO_DIR/logs"
+
+echo "==> VOL=$VOL  REPO_DIR=$REPO_DIR  VENV=$UV_PROJECT_ENVIRONMENT"
+
+# ── 1. Load secrets from .env (without leaking them into logs) ───────────────
+if [[ -f "$REPO_DIR/.env" ]]; then
+  echo "==> sourcing $REPO_DIR/.env"
+  set -a; # shellcheck disable=SC1090
+  source "$REPO_DIR/.env"; set +a
+fi
+# .env ships HF_HOME=./data/.hf_cache (the Colab default). Sourcing it just
+# clobbered our volume path, which would dump ~30GB of weights onto the tiny
+# container root. Re-pin the caches onto the persistent volume.
+export HF_HOME="$VOL/.hf_cache"
+export HF_DATASETS_CACHE="$VOL/.hf_cache/datasets"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+: "${HF_TOKEN:?HF_TOKEN must be set (export it or put it in .env)}"
+export HF_TOKEN
+export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"   # some libs read this name
+
+# ── 2. Install uv (idempotent) ───────────────────────────────────────────────
+if [[ ! -x "$UV_INSTALL_DIR/uv" ]]; then
+  echo "==> installing uv into $UV_INSTALL_DIR"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+export PATH="$UV_INSTALL_DIR:$PATH"
+hash -r
+uv --version
+
+# ── 3. Python 3.11 + dependency sync ─────────────────────────────────────────
+cd "$REPO_DIR"
+echo "==> pinning Python 3.11 + uv sync (quant + notebook extras)"
+uv python install 3.11
+uv python pin 3.11
+# Base deps (torch/transformers/peft/datasets/qwen-vl-utils/accelerate/...).
+# We deliberately SKIP the autoawq/auto-gptq build from the `quant` extra: they
+# compile against CUDA, are slow/fragile on a fresh pod, and the H3 weight-only
+# path only needs bitsandbytes — which ships prebuilt CUDA wheels.
+uv sync
+# bitsandbytes = LLM.int8 (bnb8) + NF4 4-bit (bnb4) for Task 3; wandb = training
+# curves for the deck; hf_transfer = fast multi-GB model pulls. `uv pip install`
+# does NOT auto-discover UV_PROJECT_ENVIRONMENT, so target it explicitly.
+# torch 2.6 (uv.lock resolves 2.5.1): transformers refuses to torch.load
+# ShowUI-2B's pickle .bin on torch<2.6 (CVE-2025-32434), so 2.6 is required to
+# load that specialist. Installed after uv sync to override the locked 2.5.1.
+uv pip install --python "$UV_PROJECT_ENVIRONMENT" torch==2.6.0 torchvision==0.21.0
+# einops + timm + sentencepiece are required by OS-Atlas-Pro-4B's InternViT /
+# Phi-3 (LlamaTokenizer) remote code.
+uv pip install --python "$UV_PROJECT_ENVIRONMENT" bitsandbytes hf_transfer wandb einops timm sentencepiece
+
+# ── 4. Persist HF token into the cache on the volume ─────────────────────────
+# Writes $HF_HOME/token so future processes auth without env juggling.
+uv run huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential >/dev/null 2>&1 || \
+  uv run python -c "from huggingface_hub import login; import os; login(os.environ['HF_TOKEN'])"
+
+# ── 5. Write an env file the orchestrator + tmux panes can source ────────────
+ENV_FILE="$VOL/ais5.env"
+cat > "$ENV_FILE" <<EOF
+# Auto-generated by bootstrap.sh — source this in every shell on the pod.
+export VOL="$VOL"
+export REPO_DIR="$REPO_DIR"
+export PATH="$UV_INSTALL_DIR:\$PATH"
+export UV_CACHE_DIR="$UV_CACHE_DIR"
+export UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR"
+export UV_PROJECT_ENVIRONMENT="$UV_PROJECT_ENVIRONMENT"
+export HF_HOME="$HF_HOME"
+export HF_DATASETS_CACHE="$HF_DATASETS_CACHE"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_TOKEN="$HF_TOKEN"
+export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+EOF
+[[ -n "${WANDB_API_KEY:-}" ]] && echo "export WANDB_API_KEY=\"$WANDB_API_KEY\"" >> "$ENV_FILE"
+[[ -n "${WANDB_PROJECT:-}" ]] && echo "export WANDB_PROJECT=\"$WANDB_PROJECT\"" >> "$ENV_FILE"
+echo "==> wrote $ENV_FILE"
+
+# ── 6. Verify CUDA + torch ───────────────────────────────────────────────────
+echo "==> nvidia-smi:"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
+echo "==> torch CUDA check:"
+"$UV_PROJECT_ENVIRONMENT/bin/python" - <<'PY'
+import sys, torch
+ok = torch.cuda.is_available()
+print(f"torch {torch.__version__}  cuda_available={ok}")
+if ok:
+    print(f"device      = {torch.cuda.get_device_name(0)}")
+    print(f"capability  = {torch.cuda.get_device_capability(0)}")
+    print(f"vram_total  = {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f} GB")
+    print(f"cuda_build  = {torch.version.cuda}")
+    print(f"bf16        = {torch.cuda.is_bf16_supported()}")
+else:
+    print("ERROR: CUDA not available — abort before burning a run.", file=sys.stderr)
+    sys.exit(1)
+PY
+
+# ── 7. Optional: bitsandbytes sanity (Task 3 needs it) ───────────────────────
+"$UV_PROJECT_ENVIRONMENT/bin/python" -c "import bitsandbytes as bnb; print('bitsandbytes', bnb.__version__, 'OK')" \
+  || echo "WARN: bitsandbytes import failed — Task 3 quant grid will not run."
+
+echo
+echo "============================================================"
+echo " Bootstrap complete."
+echo "   source $ENV_FILE   # in any new shell"
+echo "   bash $REPO_DIR/scripts/runpod/run_all.sh --smoke   # gate first"
+echo "============================================================"

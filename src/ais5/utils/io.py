@@ -38,6 +38,32 @@ def write_json(obj: Any, path: str | Path, *, indent: int = 2) -> None:
         json.dump(obj, f, indent=indent, default=_default)
 
 
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """Read a JSONL file into a list of dicts. Missing file returns []."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def completed_keys(
+    path: str | Path, key_fields: tuple[str, ...]
+) -> set[tuple[Any, ...]]:
+    """Return the set of `key_fields` tuples already present in a results JSONL.
+
+    Used to resume a grid run: skip cells whose key is already recorded.
+    """
+    return {
+        tuple(row.get(f) for f in key_fields) for row in read_jsonl(path)
+    }
+
+
 def write_yaml(obj: Any, path: str | Path) -> None:
     path = Path(path)
     ensure_dir(path.parent)

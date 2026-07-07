@@ -44,22 +44,36 @@ class GroundingTrainExample:
 
 
 def _coerce_image(obj: Any) -> Image | None:
-    """Turn a HF-datasets `image` field into a PIL RGB image, or None."""
-    if obj is None:
+    """Turn a HF-datasets `image` field into a PIL RGB image, or None.
+
+    Forces decode via `.load()` so corrupt or truncated bytes raise here
+    (and we skip the row) rather than producing a PIL handle that looks
+    valid by `.width`/`.height` but holds degenerate pixel data, which
+    then breaks downstream vision-tower reshapes.
+    """
+    try:
+        if obj is None:
+            return None
+        if isinstance(obj, Image):
+            img = obj if obj.mode == "RGB" else obj.convert("RGB")
+        elif isinstance(obj, (bytes, bytearray)):
+            img = PILImage.open(BytesIO(obj)).convert("RGB")
+        elif isinstance(obj, str):
+            img = PILImage.open(obj).convert("RGB")
+        elif isinstance(obj, dict):
+            # HF datasets can hand back {"bytes": b"...", "path": "..."}.
+            if obj.get("bytes") is not None:
+                img = PILImage.open(BytesIO(obj["bytes"])).convert("RGB")
+            elif obj.get("path"):
+                img = PILImage.open(obj["path"]).convert("RGB")
+            else:
+                return None
+        else:
+            return None
+        img.load()
+    except Exception:  # noqa: BLE001
         return None
-    if isinstance(obj, Image):
-        return obj if obj.mode == "RGB" else obj.convert("RGB")
-    if isinstance(obj, (bytes, bytearray)):
-        return PILImage.open(BytesIO(obj)).convert("RGB")
-    if isinstance(obj, str):
-        return PILImage.open(obj).convert("RGB")
-    if isinstance(obj, dict):
-        # HF datasets can hand back {"bytes": b"...", "path": "..."}.
-        if obj.get("bytes") is not None:
-            return PILImage.open(BytesIO(obj["bytes"])).convert("RGB")
-        if obj.get("path"):
-            return PILImage.open(obj["path"]).convert("RGB")
-    return None
+    return img
 
 
 def _bbox_center(bbox: Any) -> tuple[float, float] | None:
@@ -131,7 +145,14 @@ def adapt_uground_row(row: dict) -> GroundingTrainExample | None:
     point_match = _UGROUND_POINT_RE.search(gpt)
     if point_match is None:
         return None
-    point = (float(point_match.group(1)), float(point_match.group(2)))
+    # UGround-V1 stores click targets NORMALIZED to [0, 1000], not pixels (verified:
+    # no coordinate exceeds 1000 even on 1200-1436px-wide images). Denormalize to
+    # absolute image pixels so the collator's `<click>x, y</click>` target matches
+    # Qwen2.5-VL's pixel output convention and the eval scorer. Without this the
+    # adapter learns the wrong coordinate scale and accuracy collapses (61.5% -> 20.5%).
+    x_norm, y_norm = float(point_match.group(1)), float(point_match.group(2))
+    w, h = image.size
+    point = (x_norm / 1000.0 * w, y_norm / 1000.0 * h)
     return GroundingTrainExample(
         image=image,
         instruction=instruction,
@@ -225,14 +246,22 @@ class QwenVLGroundingCollator:
         user:      {image} + format_click_prompt(instruction)
         assistant: <click>x, y</click>
 
-    Calls the processor twice per example: once with the prompt only (to
-    locate the prefix length), once for the full conversation. Labels =
-    input_ids with the prefix and padding masked to `ignore_index`.
+    Labels = input_ids with the prompt prefix and padding masked to
+    `ignore_index`.
 
-    The two-pass tokenization is correct because the image expansion is
-    deterministic for a fixed image, so the prompt-only token count equals
-    the prefix length of the full sequence (right padding assumed, which is
-    the default for HF training).
+    Image preprocessing dominates collation cost, so each image goes through
+    the processor ONCE per example (the full conversation, which is also the
+    vision-shape validation pass). The prompt prefix length is derived without
+    a second image pass: the image's token expansion is the same in the
+    prompt-only and full tokenizations (deterministic for a fixed image), so
+
+        image_delta = len(full_with_image) - len(full_text_only)
+        prompt_len  = len(prompt_text_only) + image_delta
+
+    using the tokenizer alone for the two text-only lengths. At batch size 1
+    (the shipped config) the per-example tensors are reused directly and no
+    re-batching pass runs at all. Right padding is assumed, which is the
+    default for HF training.
     """
 
     def __init__(
@@ -280,39 +309,124 @@ class QwenVLGroundingCollator:
             },
         ]
 
-    def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
-        # Pass 1: per-example prompt-only length (where the answer starts).
-        prompt_lens: list[int] = []
-        for ex in examples:
-            msgs = self._build_messages(ex, with_answer=False)
-            prompt_text = self.processor.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True
-            )
-            prompt_tokens = self.processor(
-                text=[prompt_text],
-                images=[ex.image],
-                return_tensors="pt",
-                padding=False,
-            )
-            prompt_lens.append(int(prompt_tokens["input_ids"].shape[1]))
+    # Qwen2.5-VL's vision tower applies a 2x2 spatial merge (spatial_merge_unit=4),
+    # so images with fewer than 4 raw patches, or a non-multiple-of-4 patch
+    # count, crash the reshape. We pre-validate per-example in pass 1 and drop
+    # offenders before they reach the model.
+    _MIN_VISION_TOKENS = 4
+    _SPATIAL_MERGE_UNIT = 4
+    _RAW_PATCH_NUMEL = 3 * 2 * 14 * 14
 
-        # Pass 2: batch the full conversations.
+    @classmethod
+    def _valid_vision_shape(cls, tokens: dict[str, Any]) -> bool:
+        grid = tokens.get("image_grid_thw")
+        grid_patches: list[int] = []
+        if grid is not None and grid.numel() > 0:
+            for row in grid:
+                n_visual = int(row.prod().item())
+                grid_patches.append(n_visual)
+                if n_visual < cls._MIN_VISION_TOKENS:
+                    return False
+                if n_visual % cls._SPATIAL_MERGE_UNIT != 0:
+                    return False
+
+        # Real Qwen2.5-VL processors can return either flattened patch rows
+        # `(n_patches, 1176)` or explicit raw patches `(n_patches, 3, 2, 14, 14)`.
+        # The vision tower reshapes this tensor before the 2x2 merge, so validate
+        # the effective patch-row count and its consistency with image_grid_thw.
+        pixel_values = tokens.get("pixel_values")
+        n_patches: int | None = None
+        if pixel_values is not None:
+            ndim = getattr(pixel_values, "ndim", None)
+            shape = tuple(getattr(pixel_values, "shape", ()))
+            if ndim == 2:
+                n_patches = int(shape[0])
+            elif ndim == 5 and shape[1:] == (3, 2, 14, 14):
+                n_patches = int(shape[0])
+            elif hasattr(pixel_values, "numel") and pixel_values.numel() % cls._RAW_PATCH_NUMEL == 0:
+                n_patches = int(pixel_values.numel() // cls._RAW_PATCH_NUMEL)
+
+        if n_patches is not None:
+            if n_patches < cls._MIN_VISION_TOKENS:
+                return False
+            if n_patches % cls._SPATIAL_MERGE_UNIT != 0:
+                return False
+            if grid_patches and n_patches != sum(grid_patches):
+                return False
+
+        return True
+
+    def _text_token_len(self, text: str) -> int:
+        """Token count of `text` via the tokenizer alone (no image pass)."""
+        tok = getattr(self.processor, "tokenizer", None)
+        enc = tok(text)
+        ids = enc["input_ids"]
+        if ids and isinstance(ids[0], (list, tuple)):  # batched return shape
+            ids = ids[0]
+        return len(ids)
+
+    def __call__(self, examples: list[GroundingTrainExample]) -> dict[str, Any]:
+        # One image pass per example: tokenize the FULL conversation (also the
+        # vision-shape validation), then derive the prompt prefix length from
+        # two cheap text-only tokenizations (see class docstring).
+        valid_examples: list[GroundingTrainExample] = []
+        prompt_lens: list[int] = []
         full_texts: list[str] = []
-        images: list[Image] = []
+        per_example_tokens: list[dict[str, Any]] = []
         for ex in examples:
-            msgs = self._build_messages(ex, with_answer=True)
-            full_texts.append(
-                self.processor.apply_chat_template(
-                    msgs, tokenize=False, add_generation_prompt=False
+            try:
+                full_msgs = self._build_messages(ex, with_answer=True)
+                full_text = self.processor.apply_chat_template(
+                    full_msgs, tokenize=False, add_generation_prompt=False
                 )
+                full_tokens = self.processor(
+                    text=[full_text],
+                    images=[ex.image],
+                    return_tensors="pt",
+                    padding=False,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if not self._valid_vision_shape(full_tokens):
+                continue
+
+            try:
+                prompt_msgs = self._build_messages(ex, with_answer=False)
+                prompt_text = self.processor.apply_chat_template(
+                    prompt_msgs, tokenize=False, add_generation_prompt=True
+                )
+                image_delta = int(full_tokens["input_ids"].shape[1]) - self._text_token_len(full_text)
+                prompt_len = self._text_token_len(prompt_text) + image_delta
+            except Exception:  # noqa: BLE001
+                continue
+
+            valid_examples.append(ex)
+            prompt_lens.append(prompt_len)
+            full_texts.append(full_text)
+            per_example_tokens.append(full_tokens)
+
+        if not valid_examples:
+            raise ValueError(
+                "QwenVLGroundingCollator: every example in this batch produced "
+                "too few visual tokens for the 2x2 spatial merger. Increase "
+                "per_device_train_batch_size or tighten the adapter filter."
             )
-            images.append(ex.image)
-        batch = self.processor(
-            text=full_texts,
-            images=images,
-            return_tensors="pt",
-            padding=True,
-        )
+
+        if len(valid_examples) == 1:
+            # Shipped config (batch 1): reuse the tensors — no re-batching pass.
+            batch = dict(per_example_tokens[0])
+        else:
+            batch = self.processor(
+                text=full_texts,
+                images=[ex.image for ex in valid_examples],
+                return_tensors="pt",
+                padding=True,
+            )
+            if not self._valid_vision_shape(batch):
+                raise ValueError(
+                    "QwenVLGroundingCollator: the batched full conversation still "
+                    "has an invalid visual-token shape after per-example filtering."
+                )
 
         input_ids = batch["input_ids"]
         labels = input_ids.clone()

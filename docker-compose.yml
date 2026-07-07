@@ -32,7 +32,9 @@ services:
     <<: *base
     container_name: ais5-jupyter
     ports:
-      - "8888:8888"
+      # Bind to loopback only: the server runs token-less, so exposing it on
+      # 0.0.0.0 would give anyone on the network a shell via the kernel.
+      - "127.0.0.1:8888:8888"
     command: >
       jupyter lab
       --ip=0.0.0.0

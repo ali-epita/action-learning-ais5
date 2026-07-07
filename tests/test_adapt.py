@@ -23,6 +23,12 @@ class _FakeTokenizer:
     eos_token = "<eos>"
     eos_token_id = 1
 
+    def __call__(self, text: str, **_kwargs) -> dict:
+        # Text-only tokenization: one token per character, mirroring the fake
+        # processor's scheme minus its 3 image tokens (the collator derives the
+        # image expansion as the difference between the two).
+        return {"input_ids": [(ord(c) % 90) + 10 for c in text]}
+
 
 class _FakeProcessor:
     """Minimal Qwen2.5-VL processor stand-in.
@@ -78,11 +84,17 @@ class _FakeProcessor:
         for i, ids in enumerate(per_seq):
             out_ids[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
             out_attn[i, : len(ids)] = 1
+        # image_grid_thw matches Qwen2.5-VL's real shape (n_images, 3) = (T,H,W).
+        # Values default to (1, 4, 4) → 16 patches per image, well above the
+        # collator's 4-patch minimum for the 2x2 spatial merger.
+        grid = torch.tensor(
+            [[1, 4, 4]] * len(per_seq), dtype=torch.long
+        )
         return {
             "input_ids": out_ids,
             "attention_mask": out_attn,
             "pixel_values": torch.ones(len(per_seq), 3, 8, 8),
-            "image_grid_thw": torch.ones(len(per_seq), 1, dtype=torch.long),
+            "image_grid_thw": grid,
         }
 
 
@@ -300,6 +312,200 @@ def test_qwen_collator_sets_pad_token_when_missing():
     assert proc.tokenizer.pad_token == proc.tokenizer.eos_token
 
 
+def test_qwen_collator_drops_examples_with_too_few_vision_tokens():
+    """Examples whose `image_grid_thw` prod < spatial_merge_unit are dropped,
+    so a bad image cannot poison the rest of the batch and crash the vision
+    tower's reshape. Mixed batches keep the survivors and continue.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithTinyGridForA(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            # Mark the TINYZZ-instruction example as grid (1,1,1) → 1 visual token.
+            # The instruction is embedded in the click-prompt template, so match
+            # on the instruction text itself rather than a chat-role marker.
+            grid = out["image_grid_thw"].clone()
+            for i, t in enumerate(text):
+                if "TINYZZ" in t:
+                    grid[i] = torch.tensor([1, 1, 1], dtype=torch.long)
+            out["image_grid_thw"] = grid
+            return out
+
+    proc = _ProcWithTinyGridForA()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="TINYZZ")
+    good = _make_example(target=(50, 50), instruction="BIGZZ")
+    batch = collator([bad, good])
+    # Only the survivor "good" makes it into the batch.
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_drops_examples_with_bad_patch_tensor_shape():
+    """The real Qwen processor returns flattened patch rows in `pixel_values`.
+
+    A row can have a grid that looks barely valid while the actual patch tensor
+    still has fewer rows than the visual tower's 2x2 merge requires. The
+    collator must validate the tensor shape too, because that is what the model
+    reshapes.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithBadPatchRows(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "PATCHZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(2, 1280)
+            return out
+
+    proc = _ProcWithBadPatchRows()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="PATCHZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_validates_full_conversation_shape():
+    """Some Qwen processor failures only appear on the prompt+answer text.
+
+    The training batch uses the full conversation, so validating only the
+    prompt-only tokenization can still let a bad visual tensor reach the model.
+    """
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithBadFullRows(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "FULLBADZZ" in text[0] and "<click>" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(1, 1280)
+            return out
+
+    proc = _ProcWithBadFullRows()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="FULLBADZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_drops_5d_patch_tensor_with_too_few_rows():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithOnePatch5D(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "PATCH5DZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(1, 3, 2, 14, 14)
+            return out
+
+    proc = _ProcWithOnePatch5D()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="PATCH5DZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_drops_grid_patch_count_mismatch():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithGridPatchMismatch(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "MISMATCHZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 2, 2]], dtype=torch.long)
+                out["pixel_values"] = torch.ones(8, 1176)
+            return out
+
+    proc = _ProcWithGridPatchMismatch()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="MISMATCHZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_drops_examples_with_non_divisible_grid():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _ProcWithOddGrid(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            if len(text) == 1 and "ODDGRIDZZ" in text[0]:
+                out["image_grid_thw"] = torch.tensor([[1, 1, 5]], dtype=torch.long)
+            return out
+
+    proc = _ProcWithOddGrid()
+    collator = QwenVLGroundingCollator(proc)
+    bad = _make_example(target=(1, 1), instruction="ODDGRIDZZ")
+    good = _make_example(target=(50, 50), instruction="GOODZZ")
+    batch = collator([bad, good])
+    assert batch["input_ids"].shape[0] == 1
+
+
+def test_qwen_collator_raises_when_every_example_is_bad():
+    from ais5.adapt import QwenVLGroundingCollator
+
+    class _AllTiny(_FakeProcessor):
+        def __call__(self, *, text, images, return_tensors="pt", padding=False):
+            out = super().__call__(
+                text=text, images=images, return_tensors=return_tensors, padding=padding
+            )
+            out["image_grid_thw"] = torch.ones(
+                len(text), 3, dtype=torch.long
+            )  # prod = 1
+            return out
+
+    collator = QwenVLGroundingCollator(_AllTiny())
+    with pytest.raises(ValueError, match="too few visual tokens"):
+        collator([_make_example(instruction="A")])
+
+
+def test_resilient_collator_reuses_previous_batch_on_failure():
+    """At batch size 1, a single bad row must not abort a multi-hour run."""
+    from ais5.adapt.train import _resilient_collator
+
+    calls = {"n": 0}
+
+    def flaky(rows):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("every example in this batch produced too few visual tokens")
+        return {"input_ids": calls["n"]}
+
+    wrapped = _resilient_collator(flaky)
+    assert wrapped(["a"]) == {"input_ids": 1}
+    assert wrapped(["b"]) == {"input_ids": 1}  # failure: previous good batch re-used
+    assert wrapped(["c"]) == {"input_ids": 3}  # recovery: fresh batches again
+
+
+def test_resilient_collator_reraises_when_no_good_batch_yet():
+    from ais5.adapt.train import _resilient_collator
+
+    def always_bad(rows):
+        raise ValueError("bad")
+
+    wrapped = _resilient_collator(always_bad)
+    with pytest.raises(ValueError):
+        wrapped(["a"])
+
+
 # ── make_collator ────────────────────────────────────────────────────────────
 
 
@@ -498,5 +704,3 @@ def test_make_collator_paligemma_with_adapter():
     ]
     batch = collator(rows)
     assert "labels" in batch
-
-

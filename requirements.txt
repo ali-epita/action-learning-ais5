@@ -1,0 +1,30 @@
+# Colab/Kaggle runtime deps for the AIS 5 notebooks.
+# torch and torchvision are intentionally omitted: Colab ships a CUDA-matched
+# build, and the notebooks install the package with `pip install -e . --no-deps`
+# to keep it. Pinning torch here would fight Colab's pre-installed build.
+#
+# NOTE: this file intentionally DIVERGES from pyproject.toml (which is the
+# source of truth for local/uv installs): it adds wandb for notebook tracking
+# and bitsandbytes for the quant notebooks. Keep version floors in sync with
+# pyproject when bumping.
+
+transformers>=4.49,<5
+accelerate>=0.34
+datasets>=3.0
+huggingface-hub>=0.25
+safetensors>=0.4
+peft>=0.13
+qwen-vl-utils>=0.0.10
+bitsandbytes>=0.44; platform_system == "Linux"
+pillow>=10.4
+numpy>=1.26,<2.2
+pandas>=2.2
+pyarrow>=17.0
+matplotlib>=3.9
+seaborn>=0.13
+tqdm>=4.66
+wandb>=0.17
+pyyaml>=6.0
+rich>=13.8
+typer>=0.12
+psutil>=6.0

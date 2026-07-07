@@ -1,0 +1,13 @@
+# Zero-shot ShowUI-2B on ScreenSpot-V2 (shared specialist baseline).
+seed: 42
+limit: null
+
+model:
+  name: showui-2b
+  kwargs:
+    device_map: auto
+    torch_dtype: auto
+    max_new_tokens: 64
+
+benchmark: screenspot-v2
+data: {}

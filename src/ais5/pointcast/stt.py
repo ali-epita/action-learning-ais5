@@ -1,8 +1,13 @@
-"""On-device speech-to-text via mlx_audio (whisper) — fully offline.
+"""On-device speech-to-text via mlx_audio — fully offline.
 
-Lazy-loads a whisper model on first use and transcribes a recorded mono
-float32 waveform. Best-effort: any failure returns "" so voice input never
-crashes the pointer (the user can always type).
+Lazy-loads an ASR model on first use and transcribes a recorded mono float32
+waveform. Best-effort: any failure returns "" so voice input never crashes the
+pointer (the user can always type).
+
+Default is Parakeet-CTC-110M: for short command phrases it transcribes in
+~0.1-0.3 s (vs ~2.8 s for Whisper-large-v3-turbo), is more accurate on them,
+and resides in ~0.5 GB (a gigabyte less than Whisper) so it co-fits with the
+grounding VLM on 8 GB. Measured on an M1 8 GB, 2026-07-06.
 """
 
 from __future__ import annotations
@@ -13,10 +18,10 @@ from ..utils.logging import get_logger
 
 _log = get_logger("pointcast.stt")
 
-# Local, self-contained MLX Whisper model shipped in the repo root so voice
-# input runs fully offline (resolved as a local path before any HF lookup).
-# Run from the repo dir, or override with --stt-model / an absolute path.
-DEFAULT_STT_MODEL = "whisper-large-v3-turbo-asr-fp16"
+# Local, self-contained MLX ASR model shipped in the repo root so voice input
+# runs fully offline (resolved as a local path before any HF lookup). Run from
+# the repo dir, or override with --stt-model / an absolute path.
+DEFAULT_STT_MODEL = "parakeet-ctc-110m-asr"
 
 
 def _extract_text(result: Any) -> str:
@@ -47,6 +52,16 @@ class SpeechToText:
 
     def load(self) -> SpeechToText:
         if self._model is None:
+            import os
+
+            # Offline-first guard (mirrors the MLX backend): a bare local dir
+            # name must not fall through to a network HF lookup when missing.
+            looks_like_hf_id = self.model_id.count("/") == 1 and not os.path.exists(self.model_id)
+            if not os.path.isdir(self.model_id) and not looks_like_hf_id:
+                raise FileNotFoundError(
+                    f"STT model directory {self.model_id!r} not found. Run from the repo "
+                    "root, or pass --stt-model with an absolute path."
+                )
             from mlx_audio.stt import load as load_stt
 
             _log.info("loading STT model %s ...", self.model_id)

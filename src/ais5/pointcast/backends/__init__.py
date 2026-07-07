@@ -25,7 +25,14 @@ def get_backend(kind: str = "mlx", **kwargs) -> GroundingBackend:
 
         return MLXBackend(**kwargs)
     if kind == "gguf":
-        from .gguf_backend import GGUFBackend  # added in milestone M6
+        try:
+            from .gguf_backend import GGUFBackend  # added in milestone M6
+        except ImportError as e:
+            raise NotImplementedError(
+                "the GGUF backend is milestone M6 and is not implemented yet — "
+                "use --backend mlx (the GGUF artifacts run standalone via "
+                "llama.cpp; see MODEL_DEPLOY.md)"
+            ) from e
 
         return GGUFBackend(**kwargs)
     raise ValueError(f"unknown backend {kind!r} (expected 'mlx' or 'gguf')")

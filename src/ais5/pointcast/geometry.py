@@ -15,7 +15,33 @@ The chain has three coordinate spaces:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+
+def is_degenerate_point(point: tuple[float, float]) -> bool:
+    """True for a grounding-image point at the very top-left corner — the
+    model's non-answer for "not found", which must never be clicked (it also
+    trips pyautogui's corner FAILSAFE)."""
+    x, y = point
+    return x <= 2 and y <= 2
+
+
+def validate_logical_point(
+    lx: float, ly: float, logical_size: tuple[int, int], margin: float = 8.0
+) -> tuple[float, float] | None:
+    """Vet a mapped click point against the logical screen bounds before it is
+    allowed anywhere near a real click. A small overshoot (parser rounding, an
+    edge answer like <click>1000,1000</click>) is clamped back inside; anything
+    farther out — or non-finite — is a model failure and returns None. The
+    clamp stays 1-2 px off the exact corners so a legitimate edge click cannot
+    land on a pyautogui FAILSAFE corner."""
+    lw, lh = logical_size
+    if lw <= 0 or lh <= 0 or not (math.isfinite(lx) and math.isfinite(ly)):
+        return None
+    if not (-margin <= lx <= lw + margin and -margin <= ly <= lh + margin):
+        return None
+    return (min(max(lx, 1.0), lw - 2.0), min(max(ly, 1.0), lh - 2.0))
 
 
 def compute_ground_scale(cap_w: int, cap_h: int, max_side: int | None) -> float:

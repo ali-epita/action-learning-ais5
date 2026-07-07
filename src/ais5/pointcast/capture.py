@@ -32,12 +32,26 @@ def _logical_size(fallback: tuple[int, int]) -> tuple[int, int]:
 
 
 def capture_screen(ground_max_side: int | None = 1512, monitor_index: int = 1) -> CaptureFrame:
-    """Grab the screen and return a CaptureFrame ready for grounding + click-back."""
+    """Grab the screen and return a CaptureFrame ready for grounding + click-back.
+
+    KNOWN LIMIT (M1 scope): the click-back mapping is only validated for the
+    PRIMARY display. For other monitors, ``pyautogui.size()`` still reports the
+    primary display's logical size and mss origins mix coordinate spaces, so
+    points can land offset. A warning is logged when a non-primary monitor is
+    requested.
+    """
     import mss
 
     with mss.mss() as sct:
         monitors = sct.monitors
         idx = monitor_index if 0 <= monitor_index < len(monitors) else 1
+        if idx != 1:
+            from ..utils.logging import get_logger
+
+            get_logger("pointcast.capture").warning(
+                "monitor_index=%d: click mapping is only validated for the primary "
+                "display; expect offsets on secondary monitors", idx,
+            )
         mon = monitors[idx]
         raw = sct.grab(mon)
         full = Image.frombytes("RGB", raw.size, raw.rgb)

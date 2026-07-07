@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from ais5.pointcast.geometry import CoordinateMapper, compute_ground_scale
+from ais5.pointcast.geometry import (
+    CoordinateMapper,
+    compute_ground_scale,
+    is_degenerate_point,
+    validate_logical_point,
+)
 from ais5.pointcast.locator import confirmation_phrase, describe_region
 
 
@@ -60,6 +65,31 @@ def test_confirmation_phrase():
     p = confirmation_phrase("the Send button", 1150, 850, 1200, 900)
     assert "Send button" in p and "bottom right" in p
     assert confirmation_phrase("", 600, 450, 1200, 900) == "Clicking center."
+
+
+def test_validate_logical_point_passes_and_clamps():
+    # In-bounds points pass through untouched.
+    assert validate_logical_point(500, 300, (1000, 600)) == (500, 300)
+    # A small overshoot (parser rounding, an exact-edge answer) is clamped in.
+    assert validate_logical_point(1005, 300, (1000, 600)) == (998.0, 300)
+    assert validate_logical_point(-3, 300, (1000, 600)) == (1.0, 300)
+    # An exact-corner click is nudged off the pyautogui FAILSAFE corners.
+    assert validate_logical_point(1000, 600, (1000, 600)) == (998.0, 598.0)
+
+
+def test_validate_logical_point_rejects_wild_points():
+    assert validate_logical_point(4000, 300, (1000, 600)) is None
+    assert validate_logical_point(500, -200, (1000, 600)) is None
+    assert validate_logical_point(float("nan"), 300, (1000, 600)) is None
+    assert validate_logical_point(float("inf"), 300, (1000, 600)) is None
+    assert validate_logical_point(10, 10, (0, 0)) is None  # degenerate screen
+
+
+def test_degenerate_corner_point():
+    assert is_degenerate_point((0, 0))
+    assert is_degenerate_point((2, 2))
+    assert not is_degenerate_point((3, 3))
+    assert not is_degenerate_point((0, 50))
 
 
 if __name__ == "__main__":

@@ -4,10 +4,15 @@ Two engines, switchable:
   - "say":    macOS built-in (``/usr/bin/say``) — instant, zero model load,
               fully offline, rock-solid for the live confirm path. Default.
   - "neural": mlx_audio on-device neural voice (Kokoro) — nicer voice for the
-              showcase; lazy-loaded and played on a worker thread, with an
-              automatic fall back to ``say`` if anything goes wrong.
+              showcase, with an automatic fall back to ``say``.
 
-All non-blocking by default so speech never stalls the UI thread.
+THREADING: Kokoro is an MLX model, and MLX GPU streams are thread-bound (see
+controller.py) — running it on an ad-hoc thread concurrently with grounding
+crashes Metal. So when the controller provides ``mlx_submit`` (its single
+inference thread), ALL neural work (lazy load + generate + play) is serialized
+there. The trade-off is that a spoken phrase and a grounding call queue behind
+each other; ``say`` (the default) has no such constraint. Speech never blocks
+the UI thread and is always best-effort.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from ..utils.logging import get_logger
 
@@ -29,12 +34,15 @@ class Speaker:
         voice: str | None = None,
         neural_model: str = "prince-canuma/Kokoro-82M",
         neural_voice: str = "af_heart",
+        mlx_submit: Callable[..., None] | None = None,
     ):
         self.engine = engine
         self.voice = voice
         self.neural_model = neural_model
         self.neural_voice = neural_voice
+        self._mlx_submit = mlx_submit  # controller's single MLX inference thread
         self._proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()  # _proc is touched from several threads
         self._neural: Any = None
 
     def speak(self, text: str, *, blocking: bool = False) -> None:
@@ -57,9 +65,12 @@ class Speaker:
             if blocking:
                 subprocess.run(args, check=False)
             else:
-                self._proc = subprocess.Popen(args)
-        except Exception:
-            pass  # speech is best-effort; never crash the pointer over TTS
+                with self._proc_lock:
+                    self._proc = subprocess.Popen(args)
+        except Exception:  # noqa: BLE001
+            # Speech is best-effort; never crash the pointer over TTS — but a
+            # silently mute accessibility app is hard to diagnose, so log it.
+            _log.warning("say TTS failed", exc_info=True)
 
     # ── neural (mlx_audio) ───────────────────────────────────────────────────
     def _load_neural(self) -> None:
@@ -70,15 +81,9 @@ class Speaker:
             self._neural = load_tts(self.neural_model)
 
     def _speak_neural(self, text: str, blocking: bool) -> None:
-        try:
-            self._load_neural()
-        except Exception as e:  # noqa: BLE001
-            _log.warning("neural TTS unavailable (%r); falling back to say", e)
-            self._speak_say(text, blocking)
-            return
-
-        def _run() -> None:
+        def _job() -> None:
             try:
+                self._load_neural()
                 from mlx_audio.tts.generate import generate_audio
 
                 generate_audio(
@@ -89,15 +94,29 @@ class Speaker:
                 _log.warning("neural TTS failed (%r); falling back to say", e)
                 self._speak_say(text, blocking=True)
 
-        if blocking:
-            _run()
+        if self._mlx_submit is not None:
+            # Serialize with grounding/STT on the single MLX thread; the model
+            # is loaded there too, never on the Qt UI thread.
+            self._mlx_submit(_job)
+        elif blocking:
+            _job()
         else:
-            threading.Thread(target=_run, daemon=True).start()
+            # No MLX executor provided (headless/tests): keep the old behavior
+            # but on one thread at a time is the caller's responsibility.
+            threading.Thread(target=_job, daemon=True).start()
+
+    def is_speaking(self) -> bool:
+        """True while the `say` process is talking (best-effort; neural TTS on
+        the worker thread is not tracked). Used by live voice sessions so the
+        mic never transcribes PointCast's own speech."""
+        with self._proc_lock:
+            return self._proc is not None and self._proc.poll() is None
 
     def stop(self) -> None:
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-        self._proc = None
+        with self._proc_lock:
+            if self._proc is not None and self._proc.poll() is None:
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    pass
+            self._proc = None

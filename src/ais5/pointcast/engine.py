@@ -37,14 +37,24 @@ class GroundingEngine:
         self.backend = backend
         self.cfg = config
 
-    def warmup(self) -> None:
-        """First MLX call compiles Metal kernels (~60s); do it once at startup
-        on a dummy image so the user's first real interaction is fast."""
+    def warmup(self) -> tuple[bool, str]:
+        """First MLX call compiles Metal kernels; do it once at startup so the
+        user's first real interaction is fast. The dummy image matches the real
+        grounding size: kernels are shape-dependent, so warming on a tiny 96px
+        image still left the first full-size call paying ~15s of compile.
+
+        Returns (ok, error). A failed load must NOT be silent: the app would
+        otherwise announce "ready" and then attempt a network HF download on
+        the first real request (offline promise breach)."""
         try:
             self.backend.load()
-            self.backend.predict(Image.new("RGB", (96, 96), "white"), "warmup")
-        except Exception:
-            pass
+            w = self.cfg.ground_max_side_or_none or 1024
+            h = max(96, int(w * 0.625))  # 16:10, the common Mac aspect
+            self.backend.predict(Image.new("RGB", (w, h), "white"), "warmup")
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            _log.exception("model warmup failed")
+            return False, repr(e)
 
     def ask(self, image: Image.Image, prompt: str, *, max_tokens: int = 128) -> str:
         """Free-form question about the screen (read a value, verify a screen).
@@ -52,9 +62,27 @@ class GroundingEngine:
         screen with the same on-device model."""
         return self.backend.ask(image, prompt, max_tokens=max_tokens)
 
-    def ground(self, image: Image.Image, instruction: str) -> GroundResult:
+    def ground(
+        self,
+        image: Image.Image,
+        instruction: str,
+        *,
+        want_candidates: bool = True,
+        full_image: Image.Image | None = None,
+        full_scale: float = 1.0,
+    ) -> GroundResult:
+        """``want_candidates=False`` skips the stochastic disambiguation samples
+        on an uncertain result — callers that cannot present candidates (the
+        multi-step task runner) would otherwise pay ~4 discarded model calls.
+
+        ``full_image``/``full_scale`` (the native-resolution capture and
+        image_px/full_px) enable the retina-native Try-Twice second stage when
+        ``cfg.retina_crop`` is on."""
         if self.cfg.use_try_twice:
-            return self._ground_try_twice(image, instruction)
+            return self._ground_try_twice(
+                image, instruction, want_candidates=want_candidates,
+                full_image=full_image, full_scale=full_scale,
+            )
         _log.info("grounding (single call) for %r", instruction)
         out = self.backend.predict(image, instruction)
         pt = out.parsed.point
@@ -69,7 +97,15 @@ class GroundingEngine:
             metadata=out.metadata,
         )
 
-    def _ground_try_twice(self, image: Image.Image, instruction: str) -> GroundResult:
+    def _ground_try_twice(
+        self,
+        image: Image.Image,
+        instruction: str,
+        *,
+        want_candidates: bool = True,
+        full_image: Image.Image | None = None,
+        full_scale: float = 1.0,
+    ) -> GroundResult:
         """Full Try-Twice harness: coarse → 768 → 512 ladder + stability gate."""
         from ..tile.try_twice import TryTwiceConfig, try_twice
 
@@ -77,8 +113,14 @@ class GroundingEngine:
             crop_sizes=self.cfg.crop_sizes,
             displacement_frac=self.cfg.gate_displacement_frac,
         )
-        _log.info("grounding (Try-Twice ladder %s) for %r", list(self.cfg.crop_sizes), instruction)
-        r = try_twice(self.backend, image, instruction, cfg)
+        hires = None
+        if self.cfg.retina_crop and full_image is not None and 0 < full_scale < 1.0:
+            hires = (full_image, full_scale)
+        _log.info(
+            "grounding (Try-Twice ladder %s%s) for %r",
+            list(self.cfg.crop_sizes), ", retina crops" if hires else "", instruction,
+        )
+        r = try_twice(self.backend, image, instruction, cfg, hires=hires)
         for st in r.stages:
             if st.displacement is None:
                 _log.info("    %-8s point=%s", st.name, st.point)
@@ -93,7 +135,7 @@ class GroundingEngine:
         # Hybrid disambiguation fuel: when the gate is uncertain but the ladder
         # only produced one cluster, draw a few stochastic samples to expose
         # genuinely different candidate locations.
-        if not r.accepted and len(candidates) < 2:
+        if want_candidates and not r.accepted and len(candidates) < 2:
             candidates = self._disambiguation_candidates(image, instruction, candidates)
         return GroundResult(
             point=r.point,

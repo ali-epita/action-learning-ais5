@@ -67,7 +67,41 @@ def _dedup(points: list[Point], tol: float = 8.0) -> list[Point]:
     return out
 
 
-def _reclick(model: GUIModel, image: Image, instruction: str, center: Point, crop_size: int):
+def _reclick(
+    model: GUIModel,
+    image: Image,
+    instruction: str,
+    center: Point,
+    crop_size: int,
+    hires: tuple[Image, float] | None = None,
+):
+    """One crop-and-repredict pass. Returns (point in BASE-image coords, box).
+
+    With ``hires=(full_image, scale)`` — ``scale`` = base_px / full_px, < 1.0 —
+    the crop is taken from the FULL-resolution capture instead of the (possibly
+    downscaled) base image: the model sees ``crop_size`` NATIVE pixels, the
+    exact condition H2 measured (+6/+12 pp on small targets), and the refined
+    point is mapped back into base coordinates. The returned box is in the
+    coordinates of the image that was cropped.
+    """
+    if hires is not None:
+        full, f = hires
+        if f and f < 1.0:
+            fw, fh = full.size
+            box = _clamp_crop_box(center[0] / f, center[1] / f, crop_size, fw, fh)
+            x1, y1, _, _ = box
+            crop = full.crop(box)
+            out = model.predict(crop, instruction)
+            pt = out.parsed.point
+            if pt is None:
+                return None, box
+            rx, ry = pt
+            cw, ch = crop.size
+            if 0 <= rx <= cw and 0 <= ry <= ch:
+                # crop-local → full-image px → base (grounding) coords
+                return ((rx + x1) * f, (ry + y1) * f), box
+            return (rx * f, ry * f), box  # full-frame answer → base coords
+
     w, h = image.size
     box = _clamp_crop_box(center[0], center[1], crop_size, w, h)
     x1, y1, _, _ = box
@@ -88,10 +122,17 @@ def try_twice(
     image: Image,
     instruction: str,
     cfg: TryTwiceConfig | None = None,
+    *,
+    hires: tuple[Image, float] | None = None,
 ) -> TryTwiceResult:
+    """``hires=(full_resolution_image, scale)`` upgrades the re-click stages to
+    crop the native-resolution capture instead of the downscaled ``image``
+    (scale = image_px / full_px). All returned coordinates stay in ``image``
+    (base) space, so callers map points back exactly as before."""
     cfg = cfg or TryTwiceConfig()
     stages: list[TryTwiceStage] = []
     candidates: list[Point] = []
+    use_hires = hires is not None and bool(hires[1]) and hires[1] < 1.0
 
     coarse = model.predict(image, instruction)
     cpt = coarse.parsed.point
@@ -103,12 +144,16 @@ def try_twice(
     best = cpt
     for crop_size in cfg.crop_sizes:
         cs = max(int(crop_size), cfg.min_crop)
-        rpt, box = _reclick(model, image, instruction, best, cs)
+        rpt, box = _reclick(model, image, instruction, best, cs, hires if use_hires else None)
         if rpt is None:
             stages.append(TryTwiceStage(f"crop{cs}", None, box))
             continue  # crop parse failed — keep current best, try the next window
         disp = hypot(rpt[0] - best[0], rpt[1] - best[1])
-        thr = cfg.displacement_frac * cs
+        # Displacement is measured in base coords; in hires mode a cs-px native
+        # crop only spans cs*scale base px, so scale the window accordingly to
+        # keep the same fraction-of-window agreement semantics.
+        win_base = cs * hires[1] if use_hires else cs
+        thr = cfg.displacement_frac * win_base
         accepted = disp <= thr
         stages.append(TryTwiceStage(f"crop{cs}", rpt, box, disp, thr, accepted))
         candidates.append(rpt)

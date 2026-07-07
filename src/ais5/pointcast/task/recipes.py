@@ -16,6 +16,11 @@ class Step:
     target: str  # grounding instruction for this click (fed to the grounder)
     say: str = ""  # short spoken narration before the click ("Opening General")
     settle_ms: int = 900  # wait after the click for the UI to update before the next step
+    # Optional pre-step screen check: a short thing that must be VISIBLE before
+    # this step grounds (e.g. "the System Settings window"). If the model says
+    # it is not visible, the runner waits and rechecks once, then stops safely
+    # instead of clicking on the wrong screen (the cascade-failure killer).
+    expect: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,8 +40,9 @@ CHECK_STORAGE = Recipe(
         "storage space", "disk space", "free space", "free disk", "storage left",
     ),
     steps=(
-        Step(target="the System Settings icon in the Dock", say="Opening Settings", settle_ms=1500),
-        Step(target="General in the settings sidebar", say="Opening General", settle_ms=1000),
+        Step(target="the gray gear wheel icon in the Dock", say="Opening Settings", settle_ms=4000),
+        Step(target="General in the settings sidebar", say="Opening General", settle_ms=1000,
+             expect="the System Settings window with its sidebar"),
         Step(target="Storage in the General list", say="Opening Storage", settle_ms=1200),
     ),
     # Best-effort shortcut; only used when use_deep_links is on (verify per macOS version).
@@ -54,8 +60,9 @@ CHECK_BATTERY = Recipe(
         "how much battery", "check battery", "my battery",
     ),
     steps=(
-        Step(target="the System Settings icon in the Dock", say="Opening Settings", settle_ms=1500),
-        Step(target="Battery in the settings sidebar", say="Opening Battery", settle_ms=1200),
+        Step(target="the gray gear wheel icon in the Dock", say="Opening Settings", settle_ms=4000),
+        Step(target="Battery in the settings sidebar", say="Opening Battery", settle_ms=1200,
+             expect="the System Settings window with its sidebar"),
     ),
     deep_link="x-apple.systempreferences:com.apple.settings.Battery",
     question=(
@@ -71,8 +78,9 @@ CHECK_WIFI = Recipe(
         "am i connected", "which network", "wi-fi",
     ),
     steps=(
-        Step(target="the System Settings icon in the Dock", say="Opening Settings", settle_ms=1500),
-        Step(target="Wi-Fi in the settings sidebar", say="Opening Wi-Fi", settle_ms=1200),
+        Step(target="the gray gear wheel icon in the Dock", say="Opening Settings", settle_ms=4000),
+        Step(target="Wi-Fi in the settings sidebar", say="Opening Wi-Fi", settle_ms=1200,
+             expect="the System Settings window with its sidebar"),
     ),
     deep_link="x-apple.systempreferences:com.apple.wifi-settings-extension",
     question=(
@@ -81,28 +89,4 @@ CHECK_WIFI = Recipe(
     ),
 )
 
-# A multi-app web task. Target phrasings were each validated against real
-# screenshots of the steps (the grounder landed on the right element for all 5).
-CHECK_KAGGLE_GRADE = Recipe(
-    name="check kaggle grade",
-    utterances=(
-        "kaggle week grade", "kaggle grade", "my kaggle grade", "kaggle week 2 grade",
-        "check my kaggle", "ais kaggle grade", "kaggle week",
-    ),
-    steps=(
-        Step(target="the Google Chrome icon in the Dock", say="Opening Chrome", settle_ms=1600),
-        Step(target="the Student Profile Page bookmark in the bookmarks bar",
-             say="Opening the student profile", settle_ms=2200),
-        Step(target="Attendance in the left sidebar", say="Opening Attendance", settle_ms=2000),
-        Step(target="the Choose Courselist dropdown for Spring 2026",
-             say="Opening the Spring 2026 course list", settle_ms=1100),
-        Step(target="AIS Kaggle Week 2 S2 in the list", say="Selecting AIS Kaggle Week 2", settle_ms=2200),
-        Step(target="the View Course Marks button", say="Opening the course marks", settle_ms=2200),
-    ),
-    question=(
-        "This page shows the course marks for AIS Kaggle Week 2. What is the grade or mark? "
-        "Answer in one short sentence."
-    ),
-)
-
-RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE, CHECK_BATTERY, CHECK_WIFI, CHECK_KAGGLE_GRADE)
+RECIPES: tuple[Recipe, ...] = (CHECK_STORAGE, CHECK_BATTERY, CHECK_WIFI)

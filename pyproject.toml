@@ -61,10 +61,10 @@ dev = [
 ]
 
 [project.scripts]
-ais5-eval = "ais5.cli:eval_cmd"
-ais5-train = "ais5.cli:train_cmd"
-ais5-bench = "ais5.cli:bench_cmd"
-ais5-papers = "ais5.cli:papers_cmd"
+ais5-eval = "ais5.cli:eval_main"
+ais5-train = "ais5.cli:train_main"
+ais5-bench = "ais5.cli:bench_main"
+ais5-papers = "ais5.cli:papers_main"
 
 [build-system]
 requires = ["hatchling"]

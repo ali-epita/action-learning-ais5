@@ -100,7 +100,9 @@ def bench_cmd(
                 kwargs["quant_config"] = hf_quant
             model = get_model(model_cfg["name"], **kwargs)
             for bench in cfg["benchmarks"]:
-                samples = list(load_benchmark(bench, **cfg.get("data", {})))
+                # Lazy iterable, never list(): decoding a whole benchmark of 4K
+                # screenshots into RAM OOMs the host (see data/registry.py).
+                samples = load_benchmark(bench, **cfg.get("data", {}))
                 result = run_full_benchmark(
                     model,
                     samples,
@@ -129,18 +131,39 @@ def papers_cmd(
     out: Path = typer.Option(Path("../Papers"), "--out", help="Output directory"),
 ) -> None:
     """(Re-)download the bibliography PDFs."""
-    import runpy
+    import subprocess
+    import sys
 
     setup_logging()
-    log.info("Delegating to scripts/download_papers.py")
-    runpy.run_path(
-        str(Path(__file__).resolve().parents[2] / "scripts" / "download_papers.py"),
-        run_name="__main__",
-    )
+    script = Path(__file__).resolve().parents[2] / "scripts" / "download_papers.py"
+    log.info("Delegating to %s (out=%s)", script, out)
+    # A subprocess with an explicit argv: runpy.run_path would hand the script
+    # OUR argv (including the literal "papers" token), which its argparse rejects.
+    raise SystemExit(subprocess.run([sys.executable, str(script), "--out", str(out)], check=False).returncode)
 
 
 def main() -> None:  # pragma: no cover
     app()
+
+
+def _subcommand_entry(name: str):  # pragma: no cover
+    """Console-script shim: `[project.scripts]` must point at a callable that
+    RUNS the typer app. Pointing it at the decorated command function directly
+    calls it with OptionInfo defaults and crashes before any parsing."""
+
+    def _entry() -> None:
+        import sys
+
+        sys.argv = [sys.argv[0], name, *sys.argv[1:]]
+        app()
+
+    return _entry
+
+
+eval_main = _subcommand_entry("eval")
+train_main = _subcommand_entry("train")
+bench_main = _subcommand_entry("bench")
+papers_main = _subcommand_entry("papers")
 
 
 if __name__ == "__main__":  # pragma: no cover

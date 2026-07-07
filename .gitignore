@@ -37,7 +37,9 @@ env/
 
 # Local offline models (kept out of VCS; weights also matched by *.safetensors)
 /whisper-large-v3-turbo-asr-fp16/
+/parakeet-ctc-110m-asr/
 /mlx-qwen-r64-4bit/
+/mlx-qwen3vl-4b-4bit/
 /merged-qwen-r64/
 /gguf/
 
@@ -61,3 +63,6 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 /logs/
+
+# Stray training artifacts written next to executed notebooks
+/notebooks/executed/checkpoints/
